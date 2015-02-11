@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+        <meta charset="utf-8" />
+        <title>Wild code - coding</title>
+        <link rel="stylesheet" href="../theme/css/main.css" />
+        <link href="http://blog.viraptor.info/feeds/all.rss.xml" type="application/rss+xml" rel="alternate" title="Wild code RSS Feed" />
+
+        <!--[if IE]>
+            <script src="http://html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+        <![endif]-->
+</head>
+
+<body id="index" class="home">
+        <header id="banner" class="body">
+                <h1><a href="../">Wild code </a></h1>
+                <nav><ul>
+                    <li><a href="../category/misc.html">misc</a></li>
+                </ul></nav>
+        </header><!-- /#banner -->
+
+            <aside id="featured" class="body">
+                <article>
+                    <h1 class="entry-title"><a href="../post/44424140237/peek-and-poke-in-the-age-of-linux">Peek and poke in the age of&nbsp;Linux</a></h1>
+<footer class="post-info">
+        <abbr class="published" title="2013-03-03T14:18:00+00:00">
+                Published: Sun 03 March 2013
+        </abbr>
+
+        <address class="vcard author">
+                By                         <a class="url fn" href="../author/viraptor.html">viraptor</a>
+        </address>
+<p>In <a href="../category/misc.html">misc</a>. </p>
+<p>tags: <a href="../tag/python.html">Python</a> <a href="../tag/coding.html">coding</a> <a href="../tag/hacks.html">hacks</a> <a href="../tag/peek.html">peek</a> <a href="../tag/poke.html">poke</a> <a href="../tag/linux.html">linux</a> <a href="../tag/ptrace.html">ptrace</a> </p>
+</footer><!-- /.post-info --><p>Some time ago I ran into a production issue where the <strong>init</strong> process
+(<strong>upstart</strong>) stopped behaving properly. Specifically, instead of
+spawning new processes, it deadlocked in a transitional state. To be
+precise, the init process itself was responsive, but the critical
+services were stuck in one of the pre- or post- states, never actually
+restarting. What&#8217;s worse, upstart doesn&#8217;t allow forcing a state
+transition and trying to manually create and send <strong>DBus</strong> events didn&#8217;t
+help either. That meant the sane options we were left with&nbsp;were:</p>
+<ul>
+<li>restart the host (not desirable at all in that&nbsp;scenario)</li>
+<li>start the process manually and hope auto-respawn will not be&nbsp;needed.</li>
+</ul>
+<p>Of course there are also some insane options. Why not cheat like in the
+old times and just <strong><span class="caps">PEEK</span></strong> and <strong><span class="caps">POKE</span></strong> the process in the right
+places? The solution used at the time involved a very ugly script
+driving gdb which probably summoned satan in some edge cases. But edge
+cases were not hit and majority of hosts recovered without issues. (if
+you overwrite memory of your init process, you should expect at least a
+small percent of segfaults) After some time however I wanted to recreate
+the experiment in a cleaner way and see what interfaces are available if
+I had a legitimate use for doing something similar&nbsp;again.</p>
+<p>The goal is the same - given an upstart job name, change its <strong>goal</strong>
+and <strong>status</strong> fields to arbitrary values, without killing the <strong>init</strong>
+process. First some context&nbsp;however:</p>
+<h3>Why is peek/poke harder these&nbsp;days?</h3>
+<p>In good old times when software size was measured in kilobytes and each
+byte was quite expensive dynamic allocation was very rare. Whatever
+could be static, was static. Whatever couldn&#8217;t be, was most likely
+pooled in a specific region and there was a preset number of &#8220;things&#8221;
+the program could handle. That means your lives counter or some other
+important value was most likely always at the exact same address every
+time. That&#8217;s not the case anymore unfortunately. Almost everything needs
+to handle an arbitrary number of &#8220;things&#8221; these days and that means
+dynamic&nbsp;allocation.</p>
+<p>It&#8217;s also trivial to allocate new memory regions and <span class="caps">OS</span> takes care of
+things like making sure the memory looks like a one continuous space to
+your app, while it reality it can be all over the place. The practical
+implication is that anything we&#8217;ll need to search for in the upstart
+process will be malloc&#8217;d somewhere in the <strong>heap</strong> area. We also need to
+know where the heap happens to be at the specific&nbsp;time.</p>
+<h3>Ways of direct access to a&nbsp;process.</h3>
+<p>On Linux there are a couple of ways to access memory of a foreign
+process. The easiest two are reading directly from /proc/(pid)/mem and
+using the <strong>ptrace</strong> library. The ptrace request ids are actually called
+<strong>PTRACE_PEEKDATA</strong> and <strong>PTRACE_POKEDATA</strong> which should make their
+purpose quite clear. There&#8217;s a lot of information about them in man
+pages if you want more details, but let&#8217;s move on to some real&nbsp;action.</p>
+<p>Where to read from is another interesting question. Apart from dynamic
+allocation we&#8217;ve got virtual memory these days and additional
+memory-shifting concepts like <strong><span class="caps">ASLR</span></strong>. The up-to-date, valid
+information about where to look for data will exist under
+/proc/(pid)/maps for each running application. For the init process (<span class="caps">PID</span>
+1), it looks something like&nbsp;this:</p>
+<div class="highlight"><pre>......
+7fae2b2b7000-7fae2b2b9000 rw-p 00023000 fd:01 2860       /lib/x86_64-linux-gnu/ld-2.15.so
+7fae2b2b9000-7fae2b2df000 r-xp 00000000 fd:01 4259       /sbin/init (deleted)
+7fae2b4de000-7fae2b4e0000 r--p 00025000 fd:01 4259       /sbin/init (deleted)
+7fae2b4e0000-7fae2b4e1000 rw-p 00027000 fd:01 4259       /sbin/init (deleted)
+7fae2cf09000-7fae2cfd0000 rw-p 00000000 00:00 0          [heap]
+7fffc146b000-7fffc148c000 rw-p 00000000 00:00 0          [stack]
+7fffc1599000-7fffc159a000 r-xp 00000000 00:00 0          [vdso]
+ffffffffff600000-ffffffffff601000 r-xp 00000000 00:00 0  [vsyscall]
+</pre></div>
+
+
+<p>As previously noted, all of the interesting / long-lived data will be
+found in the heap which is annotated with a fake path &#8220;<strong>[heap]</strong>&#8220;. All
+of the ranges listed in the maps file are available. Others will give an
+error on access. Process memory acts like a stricter version of a sparse
+file in this&nbsp;case.</p>
+<h3>Nice ways of direct&nbsp;access</h3>
+<p>Both ptrace and memory-file interfaces are quite low-level, so instead
+of writing lots of C code, I&#8217;m going to use some Python instead.
+Fortunately there&#8217;s an existing <a href="https://pypi.python.org/pypi/python-ptrace">ptrace wrapper on pypi</a> and even though it
+looks abandoned, it still works very well. The interface allows easy
+&#8220;stop and attach&#8221; operation as well as exposes some interesting
+functions for address range reading and writing. Allow me to do some
+blog-literate programming here. The ptrace interface allows for easy
+attaching to a chosen <span class="caps">PID</span> (1 in this&nbsp;case):</p>
+<div class="highlight"><pre>def get_init_process():
+    d = ptrace.debugger.PtraceDebugger()
+    proc = d.addProcess(1, False)
+    return proc
+</pre></div>
+
+
+<p>Now down to the details&#8230; After a quick glance at
+<a href="http://bazaar.launchpad.net/~ubuntu-branches/ubuntu/precise/upstart/precise/view/head:/init/job.h" title="init/job.h">init/job.h</a>
+from upstart source code, it looks like we&#8217;re interested in two values
+from struct Job - goal and state. Both have a range of values described
+at the top of the file. Counting from the beginning of the struct,
+they&#8217;re at offset 5*(native pointer length), because
+<a href="http://libnih.sourcearchive.com/documentation/1.0.1/structnih__list.html" title="libnih documentation">NihList</a>
+consists of two pointers&nbsp;only.</p>
+<div class="highlight"><pre>PTR_SIZE=ptrace.cpu_info.CPU_WORD_SIZE
+JOB_CLASS_NAME_OFFSET = PTR_SIZE*2
+JOB_CLASS_PATH_OFFSET = PTR_SIZE*3
+JOB_NAME_OFFSET = PTR_SIZE*2
+JOB_JOB_CLASS_OFFSET = PTR_SIZE*3
+JOB_PATH_OFFSET = PTR_SIZE*4
+JOB_GOAL_OFFSET = PTR_SIZE*5
+</pre></div>
+
+
+<p>But struct <strong>Job</strong> is not something we can find easily. Let&#8217;s say the
+upstart job to fix is called &#8220;<em>rsyslog</em>&#8220;. This string is in the heap,
+but not pointed to from the Job structure. That part initially consisted
+of some guesswork and upstream code browsing which I&#8217;m not going to
+reproduce here, but the result is that the bytes &#8220;<em>rsyslog</em>&#8221; (or
+&#8220;<em>rsyslog\0</em>&#8221; to be precise) exists in structure <strong>JobClass</strong> in
+<a href="http://bazaar.launchpad.net/~ubuntu-branches/ubuntu/precise/upstart/precise/view/head:/init/job_class.h" title="init/job_class.h">init/job_class.h</a>.
+Actually&#8230; there and in 18 other places. That means on the current
+system I can find 19 places which contain that name terminated by a zero
+byte and the next steps are going to be figuring out how to figure out
+which of those occurrences can be traced back to the job&nbsp;itself.</p>
+<div class="highlight"><pre>def get_heap(proc):
+    return [m for m in proc.readMappings() if m.pathname == &#39;[heap]&#39;][0]
+
+def find_refs_to(mem, bytestr)
+    return [addr for addr in heap.search(bytestr)]
+</pre></div>
+
+
+<p>With such a low number of hits we can just check each of them and see
+how viable each one&nbsp;is.</p>
+<h3>Tracking&nbsp;references</h3>
+<p>So how to find out if each of the guesses is correct? By checking if the
+surrounding values and pointers makes sense. In this case the JobClass
+has a <strong>path</strong> field which according to comments is a string containing
+the DBus path for the job. As noted previously, those fields have a
+known offset from the start of the structure. Let&#8217;s write something
+generic then that will browse through given addresses and check if the
+memory referencing them looks like it could be a known&nbsp;object:</p>
+<div class="highlight"><pre>def flatten(stream):
+    result = []
+    for collection in stream:
+        result.extend(collection)
+    return result
+
+def places_referring_to(mem, search_value):
+    needle = ptrace.ctypes_tools.word2bytes(search_value)
+    return find_refs_to(mem, needle)
+
+def find_object_references(proc, heap, values, offset, verifier):
+    refs = flatten(places_referring_to(heap, value) for value in values)
+    return [ref-offset for ref in refs if verifier(proc, ref-offset)]
+</pre></div>
+
+
+<p>Now some functions that can actually judge whether some location looks
+like a Job or a JobClass by extracting expected&nbsp;strings:</p>
+<div class="highlight"><pre>def deref_string(proc, addr):
+    s_addr = proc.readWord(addr)
+    try:
+        return proc.readCString(s_addr, 100)[0]
+    except ptrace.debugger.process_error.ProcessError:
+        return None
+
+def looks_like_job_class(proc, addr):
+    s = deref_string(proc, addr+JOB_CLASS_PATH_OFFSET)
+    return s is not None and s.startswith(&#39;/com/ubuntu/Upstart/jobs/&#39;)
+
+def looks_like_job(proc, addr):
+    s = deref_string(proc, addr+JOB_PATH_OFFSET)
+    return s is not None and s.startswith(&#39;/com/ubuntu/Upstart/jobs/&#39;)
+</pre></div>
+
+
+<p>And that&#8217;s it. There could be a lot more sanity checking going on, but
+after a quick check it appears to be unnecessary. A quick run results in
+only one pointer which actually does show a valid Job&nbsp;structure.</p>
+<p>The reference chain we&#8217;re looking for is: string (name of the
+process) -> that is used in a JobClass -> that is used in a Job. To
+wrap it all up into an actual&nbsp;script:</p>
+<div class="highlight"><pre>proc = get_init_process()
+heap = get_heap(proc)
+process_strings = find_refs_to(heap, process_to_fix)
+job_classes = find_object_references(proc, heap, process_strings,
+    JOB_CLASS_NAME_OFFSET, looks_like_job_class)
+jobs = find_object_references(proc, heap, job_classes,
+    JOB_JOB_CLASS_OFFSET, looks_like_job)
+
+for job in jobs:
+    print &quot;job found at 0x%016x&quot; % job
+    goal, state = proc.readStruct(job+JOB_GOAL_OFFSET,
+        ctypes.c_int32*2)[:]
+    print &quot;goal&quot;, job_goals[goal]
+    print &quot;state&quot;, job_states[state]
+</pre></div>
+
+
+<h3>Does it all&nbsp;work?</h3>
+<p>Yes, of course it does! And pretty reliably&nbsp;actually:</p>
+<div class="highlight"><pre>sudo ./search_init.py rsyslog
+job found at 0x00007fae2cf95ca0
+goal JOB_START
+state JOB_RUNNING
+</pre></div>
+
+
+<p>After finding the right address it&#8217;s only a matter of
+<strong>proc.writeBytes()</strong> to force the change of the goal and&nbsp;state.</p>
+<p>Unfortunately there&#8217;s nothing stopping the system from being in a state
+where this change really shouldn&#8217;t happen. For example right before the
+value is read, or while it&#8217;s being copied and some code path still holds
+the old reference, or&#8230; Basically changing memory which you don&#8217;t have
+complete control over is not safe. Ever. Around 1% of machines had
+problems with init going crazy afterwards, but those could be just
+rebooted then. But as a hack that allows you to fix a critical issue,
+it&#8217;s worth remembering that it&#8217;s not rocket&nbsp;science.</p>
+<p>And finally: thanks to <a href="https://bitbucket.org/haypo" title="Victor Stinner's bitbucket repos">Victor Stinner</a>
+for writing some really useful Python&nbsp;tools.</p>                </article>
+            </aside><!-- /#featured -->
+                <section id="content" class="body">
+                    <h1>Other articles</h1>
+                    <hr />
+                    <ol id="posts-list" class="hfeed">
+
+            <li><article class="hentry">
+                <header>
+                    <h1><a href="../post/43051577987/abc-of-cracking-abc-and-unknown-protocols" rel="bookmark"
+                           title="Permalink to ABC of cracking ABC and unknown protocols"><span class="caps">ABC</span> of cracking <span class="caps">ABC</span> and unknown&nbsp;protocols</a></h1>
+                </header>
+
+                <div class="entry-content">
+<footer class="post-info">
+        <abbr class="published" title="2013-02-14T14:20:20+00:00">
+                Published: Thu 14 February 2013
+        </abbr>
+
+        <address class="vcard author">
+                By                         <a class="url fn" href="../author/viraptor.html">viraptor</a>
+        </address>
+<p>In <a href="../category/misc.html">misc</a>. </p>
+<p>tags: <a href="../tag/abc.html">abc</a> <a href="../tag/actionscript.html">actionscript</a> <a href="../tag/flash.html">flash</a> <a href="../tag/encryption.html">encryption</a> <a href="../tag/coding.html">coding</a> </p>
+</footer><!-- /.post-info -->                <p>I started playing some flash-based <span class="caps">MMORPG</span> for fun lately. The limited
+options available to the characters in RPGs are not as entertaining as
+programming, so this didn&#8217;t last long; but it definitely gave me an
+idea&#8230; Can I get the event stream and decode it without knowing
+anything about ...</p>
+                <a class="readmore" href="../post/43051577987/abc-of-cracking-abc-and-unknown-protocols">read more</a>
+                </div><!-- /.entry-content -->
+            </article></li>
+                </ol><!-- /#posts-list -->
+<p class="paginator">
+    Page 1 / 1
+</p>
+                </section><!-- /#content -->
+        <section id="extras" class="body">
+                <div class="blogroll">
+                        <h2>blogroll</h2>
+                        <ul>
+                            <li><a href="http://getpelican.com/">Pelican</a></li>
+                            <li><a href="https://news.ycombinator.com/">Hacker News</a></li>
+                        </ul>
+                </div><!-- /.blogroll -->
+                <div class="social">
+                        <h2>social</h2>
+                        <ul>
+                            <li><a href="http://blog.viraptor.info/feeds/all.rss.xml" type="application/rss+xml" rel="alternate">rss feed</a></li>
+
+                            <li><a href="http://twitter.com/viraptor">Twitter</a></li>
+                            <li><a href="http://github.com/viraptor">Github</a></li>
+                        </ul>
+                </div><!-- /.social -->
+        </section><!-- /#extras -->
+
+        <footer id="contentinfo" class="body">
+                <address id="about" class="vcard body">
+                Proudly powered by <a href="http://getpelican.com/">Pelican</a>, which takes great advantage of <a href="http://python.org">Python</a>.
+                </address><!-- /#about -->
+
+                <p>The theme is by <a href="http://coding.smashingmagazine.com/2009/08/04/designing-a-html-5-layout-from-scratch/">Smashing Magazine</a>, thanks!</p>
+        </footer><!-- /#contentinfo -->
+
+    <script type="text/javascript">
+    var _gaq = _gaq || [];
+    _gaq.push(['_setAccount', 'UA-260586-9']);
+    _gaq.push(['_trackPageview']);
+    (function() {
+        var ga = document.createElement('script'); ga.type = 'text/javascript'; ga.async = true;
+        ga.src = ('https:' == document.location.protocol ? 'https://ssl' : 'http://www') + '.google-analytics.com/ga.js';
+        var s = document.getElementsByTagName('script')[0]; s.parentNode.insertBefore(ga, s);
+    })();
+    </script>
+</body>
+</html>

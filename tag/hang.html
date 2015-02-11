@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+        <meta charset="utf-8" />
+        <title>Wild code - hang</title>
+        <link rel="stylesheet" href="../theme/css/main.css" />
+        <link href="http://blog.viraptor.info/feeds/all.rss.xml" type="application/rss+xml" rel="alternate" title="Wild code RSS Feed" />
+
+        <!--[if IE]>
+            <script src="http://html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+        <![endif]-->
+</head>
+
+<body id="index" class="home">
+        <header id="banner" class="body">
+                <h1><a href="../">Wild code </a></h1>
+                <nav><ul>
+                    <li><a href="../category/misc.html">misc</a></li>
+                </ul></nav>
+        </header><!-- /#banner -->
+
+            <aside id="featured" class="body">
+                <article>
+                    <h1 class="entry-title"><a href="../post/78913741974/things-that-go-boom-and-hang-with-vagrant-and-arch">Things that go boom and hang with vagrant and&nbsp;arch</a></h1>
+<footer class="post-info">
+        <abbr class="published" title="2014-03-08T14:59:00+00:00">
+                Published: Sat 08 March 2014
+        </abbr>
+
+        <address class="vcard author">
+                By                         <a class="url fn" href="../author/viraptor.html">viraptor</a>
+        </address>
+<p>In <a href="../category/misc.html">misc</a>. </p>
+<p>tags: <a href="../tag/vagrant.html">vagrant</a> <a href="../tag/kvm.html">kvm</a> <a href="../tag/libvirt.html">libvirt</a> <a href="../tag/arch.html">arch</a> <a href="../tag/linux.html">linux</a> <a href="../tag/fail.html">fail</a> <a href="../tag/freeze.html">freeze</a> <a href="../tag/hang.html">hang</a> </p>
+</footer><!-- /.post-info --><p>Here&#8217;s a list of things that currently fail when trying to run vagrant
+under Arch. Hopefully I hit most of the keywords from errors and you&#8217;re
+reading this because you ran into one of&nbsp;those.</p>
+<h3>Vagrant is not an official Arch&nbsp;package.</h3>
+<p>It&#8217;s in <span class="caps">AUR</span> though - https://aur.archlinux.org/packages/vagrant/ (vote
+for it!) and `pacaur -S vagrant` will happily install&nbsp;it.</p>
+<h3>Wrong guest additions&nbsp;version</h3>
+<p>Arch will most likely install virtualbox with a different api than guest
+additions in the box you downloaded from the internet. This is easily
+fixable by either creating your own compatible box, or adding a plugin&nbsp;via:</p>
+<div class="highlight"><pre>vagrant plugin install vagrant-vbguest
+</pre></div>
+
+
+<p>This will make sure that after every new vm is started, the guest
+additions version will be checked. If it doesn&#8217;t match or isn&#8217;t
+installed, guest additions will be downloaded and forced to&nbsp;comply.</p>
+<p>If you provide the iso, the addins will be installed from the <span class="caps">CD</span>. No,
+the internet doesn&#8217;t know how to make sure the guest additions <span class="caps">CD</span> is
+mounted automatically. No, you can&#8217;t access the &#8220;Install guest
+additions&#8221; menu unless you use the gui for the vm. No, it doesn&#8217;t make&nbsp;sense.</p>
+<h3>Reading from shared folders&nbsp;hangs</h3>
+<p>If reading from shared folders causes freezes and stracing results in
+just a looped call to `getdents()`, you have incompatible guest
+additions. Problem described
+<a href="https://bbs.archlinux.org/viewtopic.php?id=169953">here</a>. Solution -
+see&nbsp;above.</p>
+<h3>Rebooting the <span class="caps">VM</span> results in a&nbsp;freeze</h3>
+<p>If you don&#8217;t update guest additions, shared folders don&#8217;t work. If you
+do, the host will freeze during the bootup after the first reset. Yes it
+does. That&#8217;s&nbsp;all.</p>
+<h3>There&#8217;s a kvm module for&nbsp;vagrant!</h3>
+<p>Some sanity can be hopefully restored by using <span class="caps">KVM</span>/libvirt instead of
+vbox. There are two modules -
+<a href="https://github.com/adrahon/vagrant-kvm">vagrant-kvm</a> and
+<a href="https://github.com/pradels/vagrant-libvirt">vagrant-libvirt</a>. Both will
+fail to&nbsp;install.</p>
+<h3>How to install&nbsp;vagrant-kvm</h3>
+<p>Trying to simply run `vagrant plugin install vagrant-kvm` will result&nbsp;in:</p>
+<div class="highlight"><pre>Installing the &#39;vagrant-kvm&#39; plugin. This can take a few minutes...
+...in `run&#39;: ERROR: Failed to build gem native extension. (Gem::Installer::ExtensionBuildError)
+</pre></div>
+
+
+<p>The log in `mkmf.log` will tell you&nbsp;that:</p>
+<div class="highlight"><pre>/usr/..../libvirt.so: undefined reference to `curl_global_init@CURL_OPENSSL_4&#39;
+</pre></div>
+
+
+<p>(and many other functions too). The problem is described
+<a href="https://bbs.archlinux.org/viewtopic.php?pid=1387378">here</a> and all you
+need to do is move away the following files from
+`/opt/vagrant/embedded/lib/`: `libcurl.so`, `libcurl.so.4`,
+`libcurl.so.4&#8230;.` (whichever version you have at the moment). Finally
+move `/opt/vagrant/embedded/lib/pkgconfig/libcurl.pc`. Now
+`vagrant-kvm` will install succesfully and you can move the files back
+into the original&nbsp;place.</p>
+<h3>Vagrant-kvm doesn&#8217;t work because &#8220;authentication failed:&nbsp;polkit&#8221;</h3>
+<p>Of course it won&#8217;t. Arch simply installs libvirt and leaves you holding
+the baby. Read <a href="https://wiki.archlinux.org/index.php/Libvirt#Configuration">the arch wiki</a> and
+setup the polkit rules. Also you have to create the libvirt group, even
+though the wiki lists it as an alternative&nbsp;way.</p>
+<h3>Vagrant-kvm doesn&#8217;t work because &#8220;Failed to connect socket to&nbsp;&#8230;&#8221;</h3>
+<p>Restart your libvirt&nbsp;using:</p>
+<div class="highlight"><pre>sudo systemctl restart libvirtd
+</pre></div>
+
+
+<h3>Vagrant-kvm doesn&#8217;t work becuase &#8220;Could not create file: Permission&nbsp;denied&#8221;</h3>
+<p>At some point when you weren&#8217;t looking something changed the owner of
+`\~/.vagrant.d/tmp/storage-pool` to root. That means the process
+spawning the vm is not running as you anymore and most likely you
+removed the `rx&#8217; rights from &#8220;others&#8221; on your home directory. For this
+one I don&#8217;t have a good solution anymore. You&#8217;ll have to give &#8216;x&#8217; rights
+on your home either to all (`chmod o+x \~`), or just to `users` and
+`libvirt` using the&nbsp;acls.</p>
+<h3>Vagrant-kvm doesn&#8217;t work because &#8220;VagrantPlugins::ProviderKvm::Action::<span class="caps">NFS</span>&#8221;</h3>
+<p>You&#8217;re right, it doesn&#8217;t. You have to repackage vagrant-kvm from master
+branch, because the fix is not released yet (as of March 2014). Read the
+<a href="https://github.com/adrahon/vagrant-kvm/issues/158">upstream issue</a> and
+follow the gem repackaging&nbsp;instructions.</p>                </article>
+<p class="paginator">
+    Page 1 / 1
+</p>
+            </aside><!-- /#featured -->
+        <section id="extras" class="body">
+                <div class="blogroll">
+                        <h2>blogroll</h2>
+                        <ul>
+                            <li><a href="http://getpelican.com/">Pelican</a></li>
+                            <li><a href="https://news.ycombinator.com/">Hacker News</a></li>
+                        </ul>
+                </div><!-- /.blogroll -->
+                <div class="social">
+                        <h2>social</h2>
+                        <ul>
+                            <li><a href="http://blog.viraptor.info/feeds/all.rss.xml" type="application/rss+xml" rel="alternate">rss feed</a></li>
+
+                            <li><a href="http://twitter.com/viraptor">Twitter</a></li>
+                            <li><a href="http://github.com/viraptor">Github</a></li>
+                        </ul>
+                </div><!-- /.social -->
+        </section><!-- /#extras -->
+
+        <footer id="contentinfo" class="body">
+                <address id="about" class="vcard body">
+                Proudly powered by <a href="http://getpelican.com/">Pelican</a>, which takes great advantage of <a href="http://python.org">Python</a>.
+                </address><!-- /#about -->
+
+                <p>The theme is by <a href="http://coding.smashingmagazine.com/2009/08/04/designing-a-html-5-layout-from-scratch/">Smashing Magazine</a>, thanks!</p>
+        </footer><!-- /#contentinfo -->
+
+    <script type="text/javascript">
+    var _gaq = _gaq || [];
+    _gaq.push(['_setAccount', 'UA-260586-9']);
+    _gaq.push(['_trackPageview']);
+    (function() {
+        var ga = document.createElement('script'); ga.type = 'text/javascript'; ga.async = true;
+        ga.src = ('https:' == document.location.protocol ? 'https://ssl' : 'http://www') + '.google-analytics.com/ga.js';
+        var s = document.getElementsByTagName('script')[0]; s.parentNode.insertBefore(ga, s);
+    })();
+    </script>
+</body>
+</html>

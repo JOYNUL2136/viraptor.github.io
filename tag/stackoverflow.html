@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+        <meta charset="utf-8" />
+        <title>Wild code - stackoverflow</title>
+        <link rel="stylesheet" href="../theme/css/main.css" />
+        <link href="http://blog.viraptor.info/feeds/all.rss.xml" type="application/rss+xml" rel="alternate" title="Wild code RSS Feed" />
+
+        <!--[if IE]>
+            <script src="http://html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+        <![endif]-->
+</head>
+
+<body id="index" class="home">
+        <header id="banner" class="body">
+                <h1><a href="../">Wild code </a></h1>
+                <nav><ul>
+                    <li><a href="../category/misc.html">misc</a></li>
+                </ul></nav>
+        </header><!-- /#banner -->
+
+            <aside id="featured" class="body">
+                <article>
+                    <h1 class="entry-title"><a href="../post/51192360154/sip-testing-rescued-from-stackoverflow"><span class="caps">SIP</span> testing (rescued from&nbsp;stackoverflow)</a></h1>
+<footer class="post-info">
+        <abbr class="published" title="2013-05-24T11:38:00+00:00">
+                Published: Fri 24 May 2013
+        </abbr>
+
+        <address class="vcard author">
+                By                         <a class="url fn" href="../author/viraptor.html">viraptor</a>
+        </address>
+<p>In <a href="../category/misc.html">misc</a>. </p>
+<p>tags: <a href="../tag/sip.html">sip</a> <a href="../tag/stackoverflow.html">stackoverflow</a> <a href="../tag/testing.html">testing</a> <a href="../tag/deletionism.html">deletionism</a> </p>
+</footer><!-- /.post-info --><p>Just a popular stackoverflow question <span class="amp">&amp;</span> answer which was deleted as not
+constructive even with 10+ score and thousands of views (by a mod, so
+can&#8217;t vote to revert - thanks!) Keep in mind that it&#8217;s from 2009 without
+later&nbsp;reviews.</p>
+<h2>Question:</h2>
+<p>I am searching for a tool that tests
+<a href="http://en.wikipedia.org/wiki/Session_Initiation_Protocol"><span class="caps">SIP</span></a> calls. A
+platform that makes a call from <span class="caps">SIP</span> device A to <span class="caps">SIP</span> device B and reports&nbsp;results&#8230;</p>
+<p>Any idea? A simulation platform would be&nbsp;ideal.</p>
+<h2>My&nbsp;answer:</h2>
+<p>There are many solutions. Some more broken than others. Here&#8217;s a quick
+summary of what I&#8217;ve found while looking for a base for a proper
+automated testing&nbsp;solution.</p>
+<h3><a href="http://sipp.sourceforge.net/">SIPp</a></h3>
+<p>It&#8217;s ok if you want only a single dialog at a time. What doesn&#8217;t work
+here is complex scenarios where you need to synchronise 2 call legs, do
+registration, call and presence in the same scenario. If you go this
+way, you&#8217;ll end up with running multiple sipp scenarios for each
+conversation element separately. Sipp also doesn&#8217;t scale at all for
+media transfers. Even though it&#8217;s multithreaded, something stops it from
+running concurrently - if you look at <em>htop</em> for example, you&#8217;ll see
+that sipp never crosses the 100% line. Around 50 media calls it starts
+to cut audio and take all <span class="caps">CPU</span> of the&nbsp;machine.</p>
+<p>It can sometimes lose track of what&#8217;s happening, some packets which
+don&#8217;t even belong to the call really can result in a failed test. It&#8217;s
+got some silly bugs too, like case-sensitive comparing of the&nbsp;headers.</p>
+<h3><a href="http://sipper.agnity.com/">SIPr/sipper</a></h3>
+<p>Ruby-based solution where you have to write your own scenarios in Ruby.
+It&#8217;s got its own <span class="caps">SIP</span> stack and lots of tests. While it&#8217;s generally good
+and handles a lot of complex scenarios nicely, its design is terrible in
+my opinion. Bugs are hard to track down and after a week I had >10
+patches that I needed just to make it do basic stuff. Later I learned
+that some of the scenarios should have been written in a slightly
+different way, but SIPr developers were not really responsive and it
+took a lot of time to find out about it. There was no good documentation
+either. Synchronising actions of many agents is a hard problem, since
+they&#8217;d rather use an event-based, but still single-threaded approach&#8230;
+it just makes you concentrate too much on &#8220;what order can this happen in
+and do I handle it correctly&#8221; and worrying about sync/async actions,
+rather than writing the actual&nbsp;test.</p>
+<h3><a href="http://www.touchstone-inc.com/winsip.php">WinSIP</a></h3>
+<p>Commercial solution. Never tested it properly since the basic
+functionality is missing from the evaluation version and it&#8217;s hard to
+spend that much money on something you&#8217;re not sure&nbsp;works&#8230;</p>
+<h3><a href="http://www.cafesip.org/projects/sipunit/">SipUnit</a></h3>
+<p>Java-based solution reusing Jain-<span class="caps">SIP</span> stack. It can do almost any
+scenario and is fairly good. It tries to make everything non-blocking /
+action based leading to a similar situation SIPr has, but in this case
+it&#8217;s trivial to make it parallel / threaded so it&#8217;s much easier to deal
+with. It has its own share of bugs, so not everything works well in the
+vanilla package, but most of the stuff is patchable. The developers seem
+to be busy with other projects, so it&#8217;s not updated for a long time. If
+you need transfers, presence, dialog-info, custom messages, <span class="caps">RTP</span>
+handling, etc. - you&#8217;ll have to write your own modifications to support
+them. It is not good for performance testing though - each session on
+the test client side is rather heavy compared to the typical server side
+processing. That means you&#8217;ll most likely need a number of hosts doing
+the testing per one&nbsp;server/proxy.</p>
+<p>If you&#8217;re a Java-hater like me, it can be used in a simple way from
+Jython, JRuby or any other <span class="caps">JVM</span>&nbsp;language.</p>
+<p>In the end, I chose SIPunit as the least broken/evil/unusable solution.
+It is by no means perfect, but&#8230; it works in most cases. If I was doing
+the project once again with all this knowledge, I&#8217;d probably reuse SIPp
+configurations and try to write my own solution that uses proper
+threading - but I guesstimate it&#8217;s at least a ½ year project for one
+person, to make it good enough for&nbsp;production.</p>                </article>
+<p class="paginator">
+    Page 1 / 1
+</p>
+            </aside><!-- /#featured -->
+        <section id="extras" class="body">
+                <div class="blogroll">
+                        <h2>blogroll</h2>
+                        <ul>
+                            <li><a href="http://getpelican.com/">Pelican</a></li>
+                            <li><a href="https://news.ycombinator.com/">Hacker News</a></li>
+                        </ul>
+                </div><!-- /.blogroll -->
+                <div class="social">
+                        <h2>social</h2>
+                        <ul>
+                            <li><a href="http://blog.viraptor.info/feeds/all.rss.xml" type="application/rss+xml" rel="alternate">rss feed</a></li>
+
+                            <li><a href="http://twitter.com/viraptor">Twitter</a></li>
+                            <li><a href="http://github.com/viraptor">Github</a></li>
+                        </ul>
+                </div><!-- /.social -->
+        </section><!-- /#extras -->
+
+        <footer id="contentinfo" class="body">
+                <address id="about" class="vcard body">
+                Proudly powered by <a href="http://getpelican.com/">Pelican</a>, which takes great advantage of <a href="http://python.org">Python</a>.
+                </address><!-- /#about -->
+
+                <p>The theme is by <a href="http://coding.smashingmagazine.com/2009/08/04/designing-a-html-5-layout-from-scratch/">Smashing Magazine</a>, thanks!</p>
+        </footer><!-- /#contentinfo -->
+
+    <script type="text/javascript">
+    var _gaq = _gaq || [];
+    _gaq.push(['_setAccount', 'UA-260586-9']);
+    _gaq.push(['_trackPageview']);
+    (function() {
+        var ga = document.createElement('script'); ga.type = 'text/javascript'; ga.async = true;
+        ga.src = ('https:' == document.location.protocol ? 'https://ssl' : 'http://www') + '.google-analytics.com/ga.js';
+        var s = document.getElementsByTagName('script')[0]; s.parentNode.insertBefore(ga, s);
+    })();
+    </script>
+</body>
+</html>

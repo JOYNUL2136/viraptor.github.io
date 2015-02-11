@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
         <meta charset="utf-8" />
-        <title>Wild code</title>
-        <link rel="stylesheet" href="./theme/css/main.css" />
+        <title>Seccomp sandboxes and memcached example, part 1</title>
+        <link rel="stylesheet" href="../theme/css/main.css" />
         <link href="http://blog.viraptor.info/feeds/all.rss.xml" type="application/rss+xml" rel="alternate" title="Wild code RSS Feed" />
 
         <!--[if IE]>
@@ -13,26 +13,32 @@
 
 <body id="index" class="home">
         <header id="banner" class="body">
-                <h1><a href="./">Wild code </a></h1>
+                <h1><a href="../">Wild code </a></h1>
                 <nav><ul>
-                    <li><a href="./category/misc.html">misc</a></li>
+                    <li class="active"><a href="../category/misc.html">misc</a></li>
                 </ul></nav>
         </header><!-- /#banner -->
+<section id="content" class="body">
+  <article>
+    <header>
+      <h1 class="entry-title">
+        <a href="../post/seccomp-sandboxes-and-memcached-example-part-1" rel="bookmark"
+           title="Permalink to Seccomp sandboxes and memcached example, part 1">Seccomp sandboxes and memcached example, part&nbsp;1</a></h1>
+<a href="http://twitter.com/share" class="twitter-share-button" data-count="horizontal" data-via="viraptor">Tweet</a><script type="text/javascript" src="//platform.twitter.com/widgets.js"></script>
+    </header>
 
-            <aside id="featured" class="body">
-                <article>
-                    <h1 class="entry-title"><a href="./post/seccomp-sandboxes-and-memcached-example-part-1">Seccomp sandboxes and memcached example, part&nbsp;1</a></h1>
+    <div class="entry-content">
 <footer class="post-info">
         <abbr class="published" title="2015-02-04T12:00:00+00:00">
                 Published: Wed 04 February 2015
         </abbr>
 
         <address class="vcard author">
-                By                         <a class="url fn" href="./author/viraptor.html">viraptor</a>
+                By                         <a class="url fn" href="../author/viraptor.html">viraptor</a>
         </address>
-<p>In <a href="./category/misc.html">misc</a>. </p>
-<p>tags: <a href="./tag/memcache-seccomp-linux.html">memcache seccomp linux</a> </p>
-</footer><!-- /.post-info --><p>Many programs running for a long time on some server do not do random,
+<p>In <a href="../category/misc.html">misc</a>. </p>
+<p>tags: <a href="../tag/memcache-seccomp-linux.html">memcache seccomp linux</a> </p>
+</footer><!-- /.post-info -->      <p>Many programs running for a long time on some server do not do random,
 unpredictable things. They actually have a pretty well defined set of behaviours
 and anything that is outside of that set could be automatically treated as a
 bug, or a hack. For example databases do a lot of adhoc query processing, but
@@ -142,100 +148,11 @@ program termination: (error checking&nbsp;omitted)</p>
 <p>Short, simple and&nbsp;effective.</p>
 <p>In the next part I&#8217;ll describe how to apply such rules to an existing
 application, like memcached and what tools to use to verify everything still
-works as&nbsp;expected.</p>                </article>
-            </aside><!-- /#featured -->
-                <section id="content" class="body">
-                    <h1>Other articles</h1>
-                    <hr />
-                    <ol id="posts-list" class="hfeed">
+works as&nbsp;expected.</p>
+    </div><!-- /.entry-content -->
 
-            <li><article class="hentry">
-                <header>
-                    <h1><a href="./post/104373878281/reducing-a-network-problem-to-a-file-problem" rel="bookmark"
-                           title="Permalink to Reducing a network problem to a file problem (fuzzing)">Reducing a network problem to a file problem&nbsp;(fuzzing)</a></h1>
-                </header>
-
-                <div class="entry-content">
-<footer class="post-info">
-        <abbr class="published" title="2014-12-05T12:57:00+00:00">
-                Published: Fri 05 December 2014
-        </abbr>
-
-        <address class="vcard author">
-                By                         <a class="url fn" href="./author/viraptor.html">viraptor</a>
-        </address>
-<p>In <a href="./category/misc.html">misc</a>. </p>
-<p>tags: <a href="./tag/fuzzing.html">fuzzing</a> <a href="./tag/programming.html">programming</a> <a href="./tag/linux.html">linux</a> <a href="./tag/systemd.html">systemd</a> <a href="./tag/afl.html">afl</a> </p>
-</footer><!-- /.post-info -->                <p>There&#8217;s been a number of issues lately found by fuzzing input files
-(<em>strings</em>, <em>lesspipe</em>, various image issues, etc.), but these are all
-stateless apps / libraries. It&#8217;s much easier to fuzz input for <em>strings</em>
-for example, than client input to <em>mysql</em> server. The
-<a href="https://fuzzing-project.org/">fuzzing project</a> is actually concentrating on ...</p>
-                <a class="readmore" href="./post/104373878281/reducing-a-network-problem-to-a-file-problem">read more</a>
-                </div><!-- /.entry-content -->
-            </article></li>
-
-            <li><article class="hentry">
-                <header>
-                    <h1><a href="./post/78913741974/things-that-go-boom-and-hang-with-vagrant-and-arch" rel="bookmark"
-                           title="Permalink to Things that go boom and hang with vagrant and arch">Things that go boom and hang with vagrant and&nbsp;arch</a></h1>
-                </header>
-
-                <div class="entry-content">
-<footer class="post-info">
-        <abbr class="published" title="2014-03-08T14:59:00+00:00">
-                Published: Sat 08 March 2014
-        </abbr>
-
-        <address class="vcard author">
-                By                         <a class="url fn" href="./author/viraptor.html">viraptor</a>
-        </address>
-<p>In <a href="./category/misc.html">misc</a>. </p>
-<p>tags: <a href="./tag/vagrant.html">vagrant</a> <a href="./tag/kvm.html">kvm</a> <a href="./tag/libvirt.html">libvirt</a> <a href="./tag/arch.html">arch</a> <a href="./tag/linux.html">linux</a> <a href="./tag/fail.html">fail</a> <a href="./tag/freeze.html">freeze</a> <a href="./tag/hang.html">hang</a> </p>
-</footer><!-- /.post-info -->                <p>Here&#8217;s a list of things that currently fail when trying to run vagrant
-under Arch. Hopefully I hit most of the keywords from errors and you&#8217;re
-reading this because you ran into one of&nbsp;those.</p>
-<h3>Vagrant is not an official Arch&nbsp;package.</h3>
-<p>It&#8217;s in <span class="caps">AUR</span> though - https ...</p>
-                <a class="readmore" href="./post/78913741974/things-that-go-boom-and-hang-with-vagrant-and-arch">read more</a>
-                </div><!-- /.entry-content -->
-            </article></li>
-
-            <li><article class="hentry">
-                <header>
-                    <h1><a href="./post/75262988169/ubuntu-unattended-upgrades-the-salt-way" rel="bookmark"
-                           title="Permalink to Ubuntu unattended upgrades the salt way">Ubuntu unattended upgrades the salt&nbsp;way</a></h1>
-                </header>
-
-                <div class="entry-content">
-<footer class="post-info">
-        <abbr class="published" title="2014-02-02T03:25:00+00:00">
-                Published: Sun 02 February 2014
-        </abbr>
-
-        <address class="vcard author">
-                By                         <a class="url fn" href="./author/viraptor.html">viraptor</a>
-        </address>
-<p>In <a href="./category/misc.html">misc</a>. </p>
-<p>tags: <a href="./tag/salt.html">salt</a> <a href="./tag/ubuntu.html">ubuntu</a> <a href="./tag/unattended-upgrade.html">unattended upgrade</a> </p>
-</footer><!-- /.post-info -->                <p>There are many ways to turn on the unattended upgrades in Ubuntu.
-Creating files in /etc/apt/apt.conf.d, reconfiguring the package by
-hand, reinstalling after debconf,&nbsp;etc.</p>
-<p>Here&#8217;s a simple way to do it with salt without breaking the Ubuntu /
-debconf&nbsp;integration:</p>
-<div class="highlight"><pre>unattended-upgrades:
-  debconf.set:
-    - data:
-        &#39;unattended-upgrades ...</pre></div>
-                <a class="readmore" href="./post/75262988169/ubuntu-unattended-upgrades-the-salt-way">read more</a>
-                </div><!-- /.entry-content -->
-            </article></li>
-                </ol><!-- /#posts-list -->
-<p class="paginator">
-    Page 1 / 3
-        <a href="./index2.html">&raquo;</a>
-</p>
-                </section><!-- /#content -->
+  </article>
+</section>
         <section id="extras" class="body">
                 <div class="blogroll">
                         <h2>blogroll</h2>

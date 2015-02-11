@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+        <meta charset="utf-8" />
+        <title>Setting up Flashcache the hard way and some talk about initramfs</title>
+        <link rel="stylesheet" href="../../theme/css/main.css" />
+        <link href="http://blog.viraptor.info/feeds/all.rss.xml" type="application/rss+xml" rel="alternate" title="Wild code RSS Feed" />
+
+        <!--[if IE]>
+            <script src="http://html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+        <![endif]-->
+</head>
+
+<body id="index" class="home">
+        <header id="banner" class="body">
+                <h1><a href="../../">Wild code </a></h1>
+                <nav><ul>
+                    <li class="active"><a href="../../category/misc.html">misc</a></li>
+                </ul></nav>
+        </header><!-- /#banner -->
+<section id="content" class="body">
+  <article>
+    <header>
+      <h1 class="entry-title">
+        <a href="../../post/45310603661/setting-up-flashcache-the-hard-way-and-some-talk" rel="bookmark"
+           title="Permalink to Setting up Flashcache the hard way and some talk about initramfs">Setting up Flashcache the hard way and some talk about&nbsp;initramfs</a></h1>
+<a href="http://twitter.com/share" class="twitter-share-button" data-count="horizontal" data-via="viraptor">Tweet</a><script type="text/javascript" src="//platform.twitter.com/widgets.js"></script>
+    </header>
+
+    <div class="entry-content">
+<footer class="post-info">
+        <abbr class="published" title="2013-03-14T12:20:00+00:00">
+                Published: Thu 14 March 2013
+        </abbr>
+
+        <address class="vcard author">
+                By                         <a class="url fn" href="../../author/viraptor.html">viraptor</a>
+        </address>
+<p>In <a href="../../category/misc.html">misc</a>. </p>
+<p>tags: <a href="../../tag/flashcache.html">flashcache</a> <a href="../../tag/ssd.html">ssd</a> <a href="../../tag/kernel.html">kernel</a> <a href="../../tag/initcpio.html">initcpio</a> <a href="../../tag/linux.html">linux</a> <a href="../../tag/arch.html">arch</a> </p>
+</footer><!-- /.post-info -->      <p>If you follow the latest versions of&#8230; everything and tried to install
+flashcache you probably noticed that none of the current guides are
+correct regarding how to install it. Or they are mostly correct but with
+some bits missing. So here&#8217;s an attempt to do a refreshed guide. I&#8217;m
+using kernel version <strong>3.7.10</strong> and mkinitcpio version <strong>0.13.0</strong> (this
+actually matters, the interface for adding hooks and modules has&nbsp;changed).</p>
+<p>Some of the guide is likely to be Arch-specific. I don&#8217;t know how much,
+so please watch out if you&#8217;re using another system. I&#8217;m going to explain
+why things are done the way they are, so you can replicate them under
+other&nbsp;circumstances.</p>
+<h3>Why&nbsp;flashcache?</h3>
+<p>First, what do I want to achieve? I&#8217;m setting up a system which has a
+large spinning disk (<span class="caps">300GB</span>) and a rather small <span class="caps">SSD</span> (<span class="caps">16GB</span>). Why such a
+weird combination? Lenovo allowed me to add a free <span class="caps">16GB</span> <span class="caps">SSD</span> drive to the
+laptop configuration - couldn&#8217;t say no ;) The small disk is not useful
+for a filesystem on its own, but if all disk writes/reads were cached on
+it before writing them back to the platters, it should give my system a
+huge performance gain without a huge money loss. Flashcache can achieve
+exactly that. It was written by people working for Facebook to speed up
+their databases, but it works just as well for many other usage&nbsp;scenarios.</p>
+<p>Why not other modules like bcache or something else dm-based? Because
+flashcache does not require kernel modifications. It&#8217;s just a module and
+a set of utilities. You get a new kernel and they &#8220;just work&#8221; again - no
+source patching required. I&#8217;m excited about the efforts for making
+<a href="http://bcache.evilpiepirate.org/">bcache</a> part of the kernel and for
+the new <a href="http://www.mail-archive.com/stable@vger.kernel.org/msg33526.html">dm cache target</a>
+coming in 3.9, but for now flashcache is what&#8217;s available in the easiest&nbsp;way.</p>
+<p>I&#8217;m going to set up two <span class="caps">SSD</span> partitions because I want to cache two real
+partitions. There has to be a persistent 1:1 mapping between the cache
+and real storage for flashcache to work. One of the partitions is home
+(/home), the other is the root&nbsp;(/).</p>
+<h3>Preparation</h3>
+<p>Take backups, make sure you have a bootable installer of your system,
+make sure you really want to try this. Any mistake can cost you all the
+contents of your harddrive or break your grub configuration, so that
+you&#8217;ll need an alternative method of accessing your system. Also some of
+your &#8220;data has been written&#8221; guarantees are going to disappear. You&#8217;ve
+been&nbsp;warned.</p>
+<h3>Building the modules and&nbsp;tools</h3>
+<p>First we need the source. Make sure your git is installed and clone the
+flashcache repository:&nbsp;https://github.com/facebook/flashcache</p>
+<p>Then build it, specifying the path where the kernel source is located -
+in case you&#8217;re in the middle of a version upgrade, this is the version
+you&#8217;re compiling for, not the one you&#8217;re using&nbsp;now:</p>
+<div class="highlight"><pre>make KERNEL_TREE=/usr/src/linux-3.7.10-1-ARCH KERNEL_SOURCE_VERSION=3.7.10-1-ARCH
+sudo make KERNEL_TREE=/usr/src/linux-3.7.10-1-ARCH KERNEL_SOURCE_VERSION=3.7.10-1-ARCH install
+</pre></div>
+
+
+<p>There should be no surprises at all until now. The above should install
+a couple of things - the module and 4&nbsp;utilities:</p>
+<div class="highlight"><pre>/usr/lib/modules/&lt;version&gt;/extra/flashcache/flashcache.ko
+/sbin/flashcache_load
+/sbin/flashcache_create
+/sbin/flashcache_destroy
+/sbin/flashcache_setioctl
+</pre></div>
+
+
+<p>The module is the most interesting bit at the moment, but to load the
+cache properly at boot time, we&#8217;ll need to put those binaries on the&nbsp;ramdisk.</p>
+<h3>Configuring&nbsp;ramdisk</h3>
+<p>Arch system creates the ramdisk using <strong>mkinitcpio</strong> (which is a
+successor to initramfs (which is a successor to initrd)) - you can read
+some more about it at <a href="https://wiki.ubuntu.com/Initramfs" title="Initramfs">Ubuntu wiki</a> for example. The
+way this works is via hooks configured in <strong>/etc/mkinitcpio.conf</strong>. When
+the new kernel gets created, all hooks from that file are run in the
+defined order to build up the contents of what ends up in
+/boot/initramfs-linux.img (unless you changed the&nbsp;default).</p>
+<p>The runtime scripts live in /usr/lib/initcpio/hooks while the ramdisk
+building elements live in <strong>/usr/lib/initcpio/install</strong>. Now the
+interesting part starts: first let&#8217;s place all needed bits into the
+ramdisk, by creating install hook
+<strong>/usr/lib/initcpio/install/flashcache</strong>&nbsp;:</p>
+<div class="highlight"><pre># vim: set ft=sh:
+
+build ()
+{
+    add_module &quot;dm-mod&quot;
+    add_module &quot;flashcache&quot;
+
+    add_dir &quot;/dev/mapper&quot;
+    add_binary &quot;/usr/sbin/dmsetup&quot;
+    add_binary &quot;/sbin/flashcache_create&quot;
+    add_binary &quot;/sbin/flashcache_load&quot;
+    add_binary &quot;/sbin/flashcache_destroy&quot;
+    add_file &quot;/lib/udev/rules.d/10-dm.rules&quot;
+    add_file &quot;/lib/udev/rules.d/13-dm-disk.rules&quot;
+    add_file &quot;/lib/udev/rules.d/95-dm-notify.rules&quot;
+    add_file &quot;/lib/udev/rules.d/11-dm-lvm.rules&quot;
+
+    add_runscript
+}
+
+help ()
+{
+cat&lt;&lt;HELPEOF
+  This hook loads the necessary modules for a flash drive as a cache device for your root device.
+HELPEOF
+}
+</pre></div>
+
+
+<p>This will add the required modules (<strong>dm-mod</strong> and <strong>flashcache</strong>), make
+sure mapper directory is ready, install the tools and add some useful
+udev disk discovery rules. Same rules are included in the lvm2 hook (I
+assume you&#8217;re using it anyway), so there is an overlap, but this will
+not cause any&nbsp;conflicts.</p>
+<p>The last line of the build function makes sure that the script with
+runtime hooks will be included too. That&#8217;s the file which needs to
+ensure everything is loaded at boot time. It should contain function
+run_hook which runs after the modules are loaded, but before the
+filesystems are mounted, which is a perfect time for additional device
+setup. It looks like this and goes into
+<strong>/usr/lib/initcpio/hooks/flashcache</strong>:</p>
+<table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre> 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20</pre></div></td><td class="code"><div class="highlight"><pre><span class="c">#!/usr/bin/ash</span>
+
+run_hook <span class="o">()</span>
+<span class="o">{</span>
+    <span class="k">if</span> <span class="o">[</span> ! -e <span class="s2">&quot;/dev/mapper/control&quot;</span> <span class="o">]</span><span class="p">;</span> <span class="k">then</span>
+        /bin/mknod <span class="s2">&quot;/dev/mapper/control&quot;</span> c <span class="k">$(</span>cat /sys/class/misc/device-mapper/dev <span class="p">|</span> sed <span class="s1">&#39;s|:| |&#39;</span><span class="k">)</span>
+    <span class="k">fi</span>
+
+    <span class="o">[</span> <span class="s2">&quot;</span><span class="si">${</span><span class="nv">quiet</span><span class="si">}</span><span class="s2">&quot;</span> <span class="o">=</span> <span class="s2">&quot;y&quot;</span> <span class="o">]</span> <span class="o">&amp;&amp;</span> <span class="nv">LVMQUIET</span><span class="o">=</span><span class="s2">&quot;&gt;/dev/null&quot;</span>
+
+    msg <span class="s2">&quot;Activating cache volumes...&quot;</span>
+    <span class="nv">oIFS</span><span class="o">=</span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IFS</span><span class="si">}</span><span class="s2">&quot;</span>
+    <span class="nv">IFS</span><span class="o">=</span><span class="s2">&quot;,&quot;</span>
+    <span class="k">for</span> disk in <span class="si">${</span><span class="nv">flashcache_volumes</span><span class="si">}</span> <span class="p">;</span> <span class="k">do</span>
+        <span class="nb">eval</span> /usr/sbin/flashcache_load <span class="s2">&quot;</span><span class="si">${</span><span class="nv">disk</span><span class="si">}</span><span class="s2">&quot;</span> <span class="nv">$LVMQUIET</span>
+    <span class="k">done</span>
+    <span class="nv">IFS</span><span class="o">=</span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">oIFS</span><span class="si">}</span><span class="s2">&quot;</span>
+<span class="o">}</span>
+
+<span class="c"># vim:set ft=sh:</span>
+</pre></div>
+</td></tr></table>
+
+<p>Why the crazy splitting and where does flashcache_volumes come from?
+It&#8217;s done so that the values are not hardcoded and adding a volume
+doesn&#8217;t require rebuilding initramfs. Each variable set as kernel boot
+parameter is visible in the hook script, so adding a
+<strong>flashcache_volumes=/dev/sdb1,/dev/sdb2</strong> will activate both of those
+volumes. I just add that to the GRUB_CMDLINE_LINUX_DEFAULT variable
+in&nbsp;/etc/default/grub.</p>
+<p>The commands for loading sdb1, sdb2 are in my case the partitions on the
+<span class="caps">SSD</span> drive - but you may need to change those to match your&nbsp;environment.</p>
+<p>Additionally if you&#8217;re attempting to have your root filesystem handled
+by flashcache, you&#8217;ll need two more parameters. One is of course
+<strong>root=/dev/mapper/cached_system</strong> and the second is
+<strong>lvmwait=/dev/maper/cached_system</strong> to make sure the device is mounted
+before the system starts&nbsp;booting.</p>
+<p>At this point regenerating the initramfs (<strong>sudo mkinitcpio -p linux</strong>)
+should work and print out something about included flashcache. For&nbsp;example:</p>
+<div class="highlight"><pre>==&gt; Building image from preset: &#39;default&#39;
+  -&gt; -k /boot/vmlinuz-linux -c /etc/mkinitcpio.conf -g /boot/initramfs-linux.img
+==&gt; Starting build: 3.7.10-1-ARCH
+  -&gt; Running build hook: [base]
+  -&gt; Running build hook: [udev]
+  -&gt; Running build hook: [autodetect]
+  -&gt; Running build hook: [modconf]
+  -&gt; Running build hook: [block]
+  -&gt; Running build hook: [lvm2]
+  -&gt; Running build hook: [flashcache]
+  -&gt; Running build hook: [filesystems]
+  -&gt; Running build hook: [keyboard]
+  -&gt; Running build hook: [fsck]
+==&gt; Generating module dependencies
+==&gt; Creating gzip initcpio image: /boot/initramfs-linux.img
+==&gt; Image generation successful
+</pre></div>
+
+
+<h3>Finale - fs preparation and&nbsp;reboot</h3>
+<p>To actually create the initial caching filesystem you&#8217;ll have to prepare
+the <span class="caps">SSD</span> drive. Assuming it&#8217;s already split into partitions - each one
+for buffering data from a corresponding real partition, you have to run
+the <strong>flashcache_create</strong> app. The details of how to run it and
+available modes are described in the
+<a href="https://github.com/facebook/flashcache/blob/master/doc/flashcache-sa-guide.txt">flashcache-sa-guide.txt</a>
+file in the repository, but the simplest example is (in my case to
+create the root partition&nbsp;cache:</p>
+<div class="highlight"><pre>flashcache_create -p back cached_system /dev/sdb1 /dev/sda2
+</pre></div>
+
+
+<p>which creates a devmapper device called cached_system with fast cache
+on /dev/sdb1 and backing storage on&nbsp;/dev/sda2.</p>
+<p>Now adjust your /etc/fstab to point at the caching devices where
+necessary, install grub to include the new parameters and reboot. If
+things went well you&#8217;ll be running from the cache instead of directly
+from the spinning&nbsp;disk.</p>
+<h3>Was it worth the&nbsp;work?</h3>
+<p>Learning about initramfs and configuring it by hand - of course - it was
+lots of fun and I got a ramdisk failing to boot the system only 3 times
+in the&nbsp;process&#8230;</p>
+<p>Configuring flashcache - <span class="caps">OH</span> <span class="caps">YES</span>! It&#8217;s a night and day difference. You
+can check the stats of your cache device by running dmsetup status
+devicename. In my case after a couple of days of browsing, watching
+movies, hacking on python and haskell code, I get 92% cache hits on read
+and 58% on write on the root filesystem. On home it&#8217;s 97% and 91%
+respectively. Each partition is <span class="caps">50GB</span> <span class="caps">HDD</span> with <span class="caps">8GB</span> <span class="caps">SDD</span> cache. Since the
+cache persists across reboots, startup times have also dropped from \~5
+minutes to around a minute in&nbsp;total.</p>
+<p>I worked on <span class="caps">SSD</span>-only machines before and honestly can&#8217;t tell the
+difference between them and one with flashcache during standard usage.
+The only time when you&#8217;re likely to notice a delay is when loading a
+new, uncached program and the disk has to spin up for&nbsp;reading.</p>
+<p>Good luck with your&nbsp;setup.</p>
+    </div><!-- /.entry-content -->
+
+  </article>
+</section>
+        <section id="extras" class="body">
+                <div class="blogroll">
+                        <h2>blogroll</h2>
+                        <ul>
+                            <li><a href="http://getpelican.com/">Pelican</a></li>
+                            <li><a href="https://news.ycombinator.com/">Hacker News</a></li>
+                        </ul>
+                </div><!-- /.blogroll -->
+                <div class="social">
+                        <h2>social</h2>
+                        <ul>
+                            <li><a href="http://blog.viraptor.info/feeds/all.rss.xml" type="application/rss+xml" rel="alternate">rss feed</a></li>
+
+                            <li><a href="http://twitter.com/viraptor">Twitter</a></li>
+                            <li><a href="http://github.com/viraptor">Github</a></li>
+                        </ul>
+                </div><!-- /.social -->
+        </section><!-- /#extras -->
+
+        <footer id="contentinfo" class="body">
+                <address id="about" class="vcard body">
+                Proudly powered by <a href="http://getpelican.com/">Pelican</a>, which takes great advantage of <a href="http://python.org">Python</a>.
+                </address><!-- /#about -->
+
+                <p>The theme is by <a href="http://coding.smashingmagazine.com/2009/08/04/designing-a-html-5-layout-from-scratch/">Smashing Magazine</a>, thanks!</p>
+        </footer><!-- /#contentinfo -->
+
+    <script type="text/javascript">
+    var _gaq = _gaq || [];
+    _gaq.push(['_setAccount', 'UA-260586-9']);
+    _gaq.push(['_trackPageview']);
+    (function() {
+        var ga = document.createElement('script'); ga.type = 'text/javascript'; ga.async = true;
+        ga.src = ('https:' == document.location.protocol ? 'https://ssl' : 'http://www') + '.google-analytics.com/ga.js';
+        var s = document.getElementsByTagName('script')[0]; s.parentNode.insertBefore(ga, s);
+    })();
+    </script>
+</body>
+</html>

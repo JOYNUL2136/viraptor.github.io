@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+        <meta charset="utf-8" />
+        <title>Are your data archives append-only?</title>
+        <link rel="stylesheet" href="../../theme/css/main.css" />
+        <link href="http://blog.viraptor.info/feeds/all.rss.xml" type="application/rss+xml" rel="alternate" title="Wild code RSS Feed" />
+
+        <!--[if IE]>
+            <script src="http://html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+        <![endif]-->
+</head>
+
+<body id="index" class="home">
+        <header id="banner" class="body">
+                <h1><a href="../../">Wild code </a></h1>
+                <nav><ul>
+                    <li class="active"><a href="../../category/misc.html">misc</a></li>
+                </ul></nav>
+        </header><!-- /#banner -->
+<section id="content" class="body">
+  <article>
+    <header>
+      <h1 class="entry-title">
+        <a href="../../post/62559740222/are-your-data-archives-append-only" rel="bookmark"
+           title="Permalink to Are your data archives append-only?">Are your data archives&nbsp;append-only?</a></h1>
+<a href="http://twitter.com/share" class="twitter-share-button" data-count="horizontal" data-via="viraptor">Tweet</a><script type="text/javascript" src="//platform.twitter.com/widgets.js"></script>
+    </header>
+
+    <div class="entry-content">
+<footer class="post-info">
+        <abbr class="published" title="2013-09-29T10:35:00+00:00">
+                Published: Sun 29 September 2013
+        </abbr>
+
+        <address class="vcard author">
+                By                         <a class="url fn" href="../../author/viraptor.html">viraptor</a>
+        </address>
+<p>In <a href="../../category/misc.html">misc</a>. </p>
+<p>tags: <a href="../../tag/backup.html">backup</a> <a href="../../tag/security.html">security</a> <a href="../../tag/devops.html">devops</a> </p>
+</footer><!-- /.post-info -->      <p>Any long-term data archives you keep - backups, copies of logs, code
+repositories, audit entries, etc. Are they append-only? I don&#8217;t mean
+from the perspective of the account owner. Of course the operator is
+able to do whatever he wants with those files, including deleting&nbsp;them.</p>
+<p>But what about your servers? I&#8217;ve seen many backup manuals, or even
+published scripts which pretty much require you to setup the S3 account
+and that&#8217;s it. They&#8217;ll manage the files inside and make sure everything
+is updated as needed. But there&#8217;s a problem with that strategy - what if
+someone else gains control of your server? What can they do to your&nbsp;archives?</p>
+<p>Can they, in one go, wipe both your current database and all the
+available backups using credentials stored locally? Or all of the logs
+from this and other services? Can they wipe the code repositories using
+your deployment keys? Can they read all your database backups with every
+past and present account still in there? Guessing from many tutorials
+and articles, there are lots of production services out there where the
+answer is &#8220;yes&#8221; to all. Sometimes it&#8217;s not even an issue with the admins
+not trying hard enough - sometimes services themselves are really not
+prepared for protection from that kind of behaviour. Many providers
+simply don&#8217;t offer any other ways of accessing their accounts apart from
+a single user+key combination giving global access to&nbsp;everything.</p>
+<p>There are ways to provide some level of protection even without any
+support from the service provider, but it&#8217;s much easier if the access
+control is already built-in. For example when uploading data into S3,
+everything that&#8217;s needed for good protection is already provided. <span class="caps">IAM</span>
+gives you the possibility to create an account per service, or even per
+host. User permissions allow you to give only as much access as needed
+for your use case. That means your remote backup script shouldn&#8217;t need
+any more privileges than PutObject on some specific object (in case
+you&#8217;re using versioned buckets), or on a bucket (without versioning).
+The second case requires that you also assign unpredictable names (for
+example random suffixes) to the files, so that they cannot be destroyed
+by&nbsp;overwriting.</p>
+<p>Here&#8217;s an example of a user policy for S3 bucket without&nbsp;versioning:</p>
+<div class="highlight"><pre>{
+  &quot;Version&quot;: &quot;2012-10-17&quot;,
+  &quot;Statement&quot;: [
+    {
+      &quot;Action&quot;: [
+        &quot;s3:PutObject&quot;
+      ],
+      &quot;Sid&quot;: &quot;Stmt1375779806000&quot;,
+      &quot;Resource&quot;: [
+        &quot;arn:aws:s3:::blah-database-backups/*&quot;
+      ],
+      &quot;Effect&quot;: &quot;Allow&quot;
+    }
+  ]
+}
+</pre></div>
+
+
+<p>But that&#8217;s not all. Even if you have a single account, there&#8217;s still a
+way to limit the potential damage to some extent. Instead of using the
+same account for upload and long-term storage of the files, get two
+accounts. Upload to the first one and keep it around only for that
+purpose. For long-term storage, set up a machine which is completely
+separated from the users (maybe even rejects all incomming connections)
+and make sure all files are moved to the second account as soon as&nbsp;possible.</p>
+<p>That kind of setup is not perfect and still allows the attacker to
+replace files that have not been moved, or download files which wouldn&#8217;t
+normally be accessible from the local filesystem. But the time window
+and amount of data that may be impacted is much lower. There&#8217;s also
+still the possiblity to encrypt the data locally using a public key
+(which can be safely stored on the server) in order to protect the&nbsp;information.</p>
+<p>So, if I got access to one of your servers and its backup system&#8230; what
+would I be able to&nbsp;achieve?</p>
+    </div><!-- /.entry-content -->
+
+  </article>
+</section>
+        <section id="extras" class="body">
+                <div class="blogroll">
+                        <h2>blogroll</h2>
+                        <ul>
+                            <li><a href="http://getpelican.com/">Pelican</a></li>
+                            <li><a href="https://news.ycombinator.com/">Hacker News</a></li>
+                        </ul>
+                </div><!-- /.blogroll -->
+                <div class="social">
+                        <h2>social</h2>
+                        <ul>
+                            <li><a href="http://blog.viraptor.info/feeds/all.rss.xml" type="application/rss+xml" rel="alternate">rss feed</a></li>
+
+                            <li><a href="http://twitter.com/viraptor">Twitter</a></li>
+                            <li><a href="http://github.com/viraptor">Github</a></li>
+                        </ul>
+                </div><!-- /.social -->
+        </section><!-- /#extras -->
+
+        <footer id="contentinfo" class="body">
+                <address id="about" class="vcard body">
+                Proudly powered by <a href="http://getpelican.com/">Pelican</a>, which takes great advantage of <a href="http://python.org">Python</a>.
+                </address><!-- /#about -->
+
+                <p>The theme is by <a href="http://coding.smashingmagazine.com/2009/08/04/designing-a-html-5-layout-from-scratch/">Smashing Magazine</a>, thanks!</p>
+        </footer><!-- /#contentinfo -->
+
+    <script type="text/javascript">
+    var _gaq = _gaq || [];
+    _gaq.push(['_setAccount', 'UA-260586-9']);
+    _gaq.push(['_trackPageview']);
+    (function() {
+        var ga = document.createElement('script'); ga.type = 'text/javascript'; ga.async = true;
+        ga.src = ('https:' == document.location.protocol ? 'https://ssl' : 'http://www') + '.google-analytics.com/ga.js';
+        var s = document.getElementsByTagName('script')[0]; s.parentNode.insertBefore(ga, s);
+    })();
+    </script>
+</body>
+</html>

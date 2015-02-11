@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+        <meta charset="utf-8" />
+        <title>Wild code - rsync</title>
+        <link rel="stylesheet" href="../theme/css/main.css" />
+        <link href="http://blog.viraptor.info/feeds/all.rss.xml" type="application/rss+xml" rel="alternate" title="Wild code RSS Feed" />
+
+        <!--[if IE]>
+            <script src="http://html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+        <![endif]-->
+</head>
+
+<body id="index" class="home">
+        <header id="banner" class="body">
+                <h1><a href="../">Wild code </a></h1>
+                <nav><ul>
+                    <li><a href="../category/misc.html">misc</a></li>
+                </ul></nav>
+        </header><!-- /#banner -->
+
+            <aside id="featured" class="body">
+                <article>
+                    <h1 class="entry-title"><a href="../post/51516551067/constructing-a-linux-home-backup-system">Constructing a (linux) home backup&nbsp;system</a></h1>
+<footer class="post-info">
+        <abbr class="published" title="2013-05-28T10:12:00+00:00">
+                Published: Tue 28 May 2013
+        </abbr>
+
+        <address class="vcard author">
+                By                         <a class="url fn" href="../author/viraptor.html">viraptor</a>
+        </address>
+<p>In <a href="../category/misc.html">misc</a>. </p>
+<p>tags: <a href="../tag/backup.html">backup</a> <a href="../tag/linux.html">linux</a> <a href="../tag/rsync.html">rsync</a> <a href="../tag/rsnapshot.html">rsnapshot</a> </p>
+</footer><!-- /.post-info --><p>I&#8217;ve got a couple of Linux machines that need a transparent backup
+solution at home. Transparent as in - they should happen all the time,
+without asking, without notification, without any interaction. Ideally
+it shouldn&#8217;t run on the client either just to avoid issues with system
+updates. Making it all server-side allows me also to backup my
+girlfriend&#8217;s machine without explaining the setup - which is great when
+even periodic upgrades are a pain to&nbsp;enforce.</p>
+<p>Another couple of requirements I had&nbsp;were:</p>
+<ul>
+<li>backing up in local network (I don&#8217;t have enough bandwidth to backup
+    remotely all the&nbsp;time)</li>
+<li>saving storage space where files don&#8217;t&nbsp;change</li>
+<li>able to run on a small device (I&#8217;ve got a
+    <a href="http://www.tonidoplug.com/">TonidoPlug</a>&nbsp;ready)</li>
+<li>directory-based rather than fs-based (I&#8217;ve got a number of VMs I
+    really don&#8217;t want to waste time backing&nbsp;up)</li>
+</ul>
+<p>Unfortunately there aren&#8217;t many good, ready solutions and there aren&#8217;t
+many choices in general either. Most solutions fall into one of the
+following groups: trivial copy, archiving solutions, rsync-like and
+full-blown&nbsp;systems.</p>
+<p>To be honest, maybe a big system like bacula can do what I need&#8230; but
+with it having more components that I have local hosts, I didn&#8217;t want to
+invest that much time in learning the&nbsp;configuration.</p>
+<p>At small companies where I set up backups, I was happy with <span class="caps">DAR</span>. Full
+backups split into volumes of a given size and stored on removable disks
+weekly, with daily diffs stored locally - perfect. Here it won&#8217;t work -
+I can&#8217;t saturate the network or disk io every couple of hours. I really
+don&#8217;t want to deal with replacing removable disks. Some more intelligent
+solution is&nbsp;required.</p>
+<h3>Enter&nbsp;rsnapshot</h3>
+<p><a href="http://www.rsnapshot.org/">Rsnapshot</a> is an interesting mix between
+systems that understand backup schedules and a minimal backup utility.
+Rsnapshot can copy files from a remote host using rsync (and ssh for
+example). Then, it knows how to hard-link files that didn&#8217;t change to
+avoid wasting both bandwidth and storage. It also knows how to rotate
+backup directories when new backups come in and how to promote backups
+between&nbsp;levels.</p>
+<p>The schedule and promotion is done in a very simple way too. Since
+rsnapshot needs to be run from some scheduler like cron, it takes the
+name of the backup as a parameter. This can be for example &#8220;daily&#8221;,
+&#8220;weekly&#8221;, &#8220;purple&#8221;, or whatever you want to call it. What&#8217;s important is
+the order in rsnapshot config file - only the first entry will get
+copied from source, others will get promoted from the &#8220;upper&#8221; level&nbsp;locally.</p>
+<p>This is pretty much exactly what was needed. For the remote copy, ssh
+can be configured to use a password-less key to authenticate on the
+remote hosts. In case it&#8217;s possible to access the backup server from the
+internet, making sure it <a href="http://technokracy.net/2011/01/07/root_sudo_rsnapshot/">can run only
+rsync</a> is a good
+idea too. For paranoid people, this can be also locked down with
+apparmor or selinux to deny anything apart from read-only&nbsp;access.</p>
+<h3>Sample&nbsp;configuration</h3>
+<p>So what does this look like in&nbsp;practice?</p>
+<p>The server which collects the backups has rsnapshot and rsync installed.
+It also has a password-less ssh key created: just run <em>ssh-keygen</em> and
+copy the resulting <em>id_rsa.pub</em> into client machine&#8217;s
+<em>\~/.ssh/authorized_keys</em>.</p>
+<p>It also has a separate partition available for each backup. In my case
+they&#8217;re mounted under <em>/media/disk1partX</em>.</p>
+<p>Now, each machine which needs backing up requires a configuration file.
+I put them all in my plug&#8217;s root directory:
+<em>/root/rsnapshot_configs/xxx.</em> Each machine looks almost the same. For
+example host <em>walker</em> has <em>/root/rsnapshot_configs/walker</em>:</p>
+<div class="highlight"><pre>config_version    1.2
+snapshot_root    /media/disk1part2/rsnapshot
+
+cmd_rsync    /usr/bin/rsync
+cmd_ssh    /usr/bin/ssh
+cmd_du    /usr/bin/du
+exclude_file    /root/rsnapshot_configs/walker.exclude
+
+retain    hourly    5
+retain    daily    7
+retain    weekly    5
+
+backup    viraptor@walker.local:/home/viraptor    viraptor
+</pre></div>
+
+
+<p>This configuration says that <em>/media/disk1part2/rsnapshot/viraptor</em> will
+keep copies of <em>/home/viraptor</em> (minus some excludes like <em>.cache</em>,
+<em>.steam</em>, etc.) - 5 hourly ones, then 7 daily ones, then 5 weekly ones.
+All files which have not changed will be hard-linked and no space will
+be wasted on exact duplicates. The backup is taken from the host
+walker.local (thanks <a href="http://avahi.org/">Avahi</a>!).</p>
+<p>But that&#8217;s only the definition of what&#8230; what about when? Crontab
+entries are what actually triggers the rsnapshot actions and they live
+in <em>/etc/cron.d</em>. The content&nbsp;is:</p>
+<div class="highlight"><pre>55 */2 * * * root (/bin/ping -c1 walker.local &gt;/dev/null 2&gt;/dev/null) &amp;&amp;
+    /usr/bin/rsnapshot -c /root/rsnapshot_configs/walker hourly
+20 3 * * * root /usr/bin/rsnapshot -c /root/rsnapshot_configs/walker daily
+20 4 * * 1 root /usr/bin/rsnapshot -c /root/rsnapshot_configs/walker weekly
+</pre></div>
+
+
+<p>This means that every 2 hours if the host is on (it most likely isn&#8217;t),
+rsnapshot will take another hourly copy. Then every day in the morning
+it will promote an old hourly snapshot to daily and once a week it will
+promote daily to&nbsp;weekly.</p>
+<h3>Summary</h3>
+<p>All simple and easy. There&#8217;s no specific recovery procedure involved,
+because all backups are available as normal files on the server. It&#8217;s
+actually easy to browse the old entries in case only one or two files
+need recovering. And in case of serious issues - just rsync everything
+back from the last snapshot. So far I&#8217;m very happy with&nbsp;it.</p>
+<p>One thing to watch out for is the exclusions file in case you don&#8217;t have
+a massive harddrive available. If you happen to install Steam with some
+games you may start getting emails about failed backups&#8230; but there&#8217;s
+only so many copies of portal or tf2 that you&#8217;ll need in your life - you
+probably don&#8217;t need them in the backups unless you have lots of space.
+<span class="caps">VM</span> images which change all the time are also very bad candidates for
+backing up with rsnapshot. Every modification there will need a
+separate, complete&nbsp;copy.</p>
+<p>With a &#8220;normal&#8221; developer-style usage the size of old copies is close to
+none. Currently, my last copy is <span class="caps">22GB</span>, but all previous snapshots and
+modifications add only <span class="caps">2GB</span> to&nbsp;that.</p>                </article>
+<p class="paginator">
+    Page 1 / 1
+</p>
+            </aside><!-- /#featured -->
+        <section id="extras" class="body">
+                <div class="blogroll">
+                        <h2>blogroll</h2>
+                        <ul>
+                            <li><a href="http://getpelican.com/">Pelican</a></li>
+                            <li><a href="https://news.ycombinator.com/">Hacker News</a></li>
+                        </ul>
+                </div><!-- /.blogroll -->
+                <div class="social">
+                        <h2>social</h2>
+                        <ul>
+                            <li><a href="http://blog.viraptor.info/feeds/all.rss.xml" type="application/rss+xml" rel="alternate">rss feed</a></li>
+
+                            <li><a href="http://twitter.com/viraptor">Twitter</a></li>
+                            <li><a href="http://github.com/viraptor">Github</a></li>
+                        </ul>
+                </div><!-- /.social -->
+        </section><!-- /#extras -->
+
+        <footer id="contentinfo" class="body">
+                <address id="about" class="vcard body">
+                Proudly powered by <a href="http://getpelican.com/">Pelican</a>, which takes great advantage of <a href="http://python.org">Python</a>.
+                </address><!-- /#about -->
+
+                <p>The theme is by <a href="http://coding.smashingmagazine.com/2009/08/04/designing-a-html-5-layout-from-scratch/">Smashing Magazine</a>, thanks!</p>
+        </footer><!-- /#contentinfo -->
+
+    <script type="text/javascript">
+    var _gaq = _gaq || [];
+    _gaq.push(['_setAccount', 'UA-260586-9']);
+    _gaq.push(['_trackPageview']);
+    (function() {
+        var ga = document.createElement('script'); ga.type = 'text/javascript'; ga.async = true;
+        ga.src = ('https:' == document.location.protocol ? 'https://ssl' : 'http://www') + '.google-analytics.com/ga.js';
+        var s = document.getElementsByTagName('script')[0]; s.parentNode.insertBefore(ga, s);
+    })();
+    </script>
+</body>
+</html>

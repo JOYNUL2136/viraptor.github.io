@@ -1,0 +1,1225 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Wild code</title><link>http://blog.viraptor.info/</link><description></description><atom:link href="http://blog.viraptor.info/feeds/all.rss.xml" rel="self"></atom:link><lastBuildDate>Wed, 04 Feb 2015 12:00:00 +0000</lastBuildDate><item><title>Seccomp sandboxes and memcached example, part 1</title><link>http://blog.viraptor.info/post/seccomp-sandboxes-and-memcached-example-part-1</link><description>&lt;p&gt;Many programs running for a long time on some server do not do random,
+unpredictable things. They actually have a pretty well defined set of behaviours
+and anything that is outside of that set could be automatically treated as a
+bug, or a hack. For example databases do a lot of adhoc query processing, but
+mostly within some known context: read/write files in a known location, accept
+incoming connections, etc. But you’d be surprised if your database started
+downloading files over http, or writing to your .bashrc for&amp;nbsp;example.&lt;/p&gt;
+&lt;p&gt;This was of course noticed and there are many external solutions for controlling
+/ whitelisting application behaviours on Linux. That’s the job of the Linux
+Security Modules. Selinux, Apparmor, Tomoyo, Smack and others can make sure that
+your database has no business writing in your home directory or opening outgoing
+connections. (unless they’re to a known slave) But this is not always
+convenient, partially because the security profile becomes external to the app.
+This may be a bad thing: app provides its rules, distro modifies them, you want
+a different layout and are left with fixing third layer of those rules. But it
+may be a good thing: the app doesn’t approving any policy, distros do, you’re
+more secure by&amp;nbsp;default.&lt;/p&gt;
+&lt;p&gt;But what about applications which want to provide their own restrictions,
+independent of the environment. Even better - can they provide restrictions in a
+better way than external &lt;span class="caps"&gt;LSM&lt;/span&gt; frameworks? Actually, to some extent they&amp;nbsp;can&amp;#8230;&lt;/p&gt;
+&lt;h2&gt;Seccomp&lt;/h2&gt;
+&lt;p&gt;There’s a pretty interesting interface called seccomp, which started its life a
+few years ago. You can find some descriptions in &lt;a href="http://lwn.net/"&gt;&lt;span class="caps"&gt;LWN&lt;/span&gt;&lt;/a&gt; about
+the first implementation. At the time it only allowed simple sandboxing of an
+app without any detailed configuration. The use case was to set up all needed
+connections and just switch to a very restricted environment where only
+accessible memory&amp;nbsp;matters.&lt;/p&gt;
+&lt;p&gt;This was useful for some small number of use cases. Unfortunately it’s not
+useful for more interesting applications like databases, main loops of servers,
+etc. If you can’t accept a new network connection, how can you do any
+interesting work? Sure, you can &lt;em&gt;clone()&lt;/em&gt;/&lt;em&gt;fork()&lt;/em&gt; after every accept, but
+that’s going to be really slow. Fortunately there were some ideas to extend the
+scheme, finally ending with a &lt;span class="caps"&gt;BFP&lt;/span&gt; based filter. That filter allows you in
+practice to do any kind of stateless check on the syscall (or a packet, as it
+was initially designed to do). Now, with a very small and pretty well designed
+bytecode, you can validate not only the syscall itself, but also its arguments.
+This allows to create conditions like “allow write(), but only to&amp;nbsp;stdout/err”.&lt;/p&gt;
+&lt;h2&gt;More interesting&amp;nbsp;scenarios&lt;/h2&gt;
+&lt;p&gt;Of course at this point we can do more creative things - for example you don’t
+have to specify your policy at the start of an app. You can skip the
+initialisation, which is usually local and trusted and only enable restrictions
+after binding all sockets. You can have a restricted initialisation profile
+which leaves the &lt;em&gt;prctl()&lt;/em&gt; call available and applies more restrictions later
+on. You can also have per-thread profiles which limit your main process to
+only accept the connections and hand them off to workers. The possibilities
+here are really&amp;nbsp;great.&lt;/p&gt;
+&lt;p&gt;To be fair to the external frameworks, you can also provide after-init profiles
+in AppArmor and Selinux, but this has a downside of relying on a specific
+implementation. There is no common &lt;span class="caps"&gt;API&lt;/span&gt; for this operation, so AppArmor has
+&lt;em&gt;change_hat()&lt;/em&gt;, while Selinux has &lt;em&gt;setcon()&lt;/em&gt;. Doing this using seccomp,
+in-process doesn’t rely on a distro-specific&amp;nbsp;framework.&lt;/p&gt;
+&lt;p&gt;So what’s the best way to learn about things like seccomp filters? Implement it
+for some existing useful application of course! Like
+&lt;a href="http://memcached.org/"&gt;memcached&lt;/a&gt;, which already accepted a less restrictive
+&lt;em&gt;drop_privileges()&lt;/em&gt; implementation for Solaris. (it prevents forks, execs,
+messing with session, but not any reads/writes as far as I&amp;nbsp;understand)&lt;/p&gt;
+&lt;h2&gt;The&amp;nbsp;implementation&lt;/h2&gt;
+&lt;p&gt;As I mentioned, the bytecode is really simple and can be written by hand, but
+it&amp;#8217;s not a great experience. For the syscall scenario there’s not much there,
+apart from loading a value at a given offset and comparing it against a known
+value. Additionally, as the seccomp documentation warns, the architecture needs
+to be checked before other operations. It could be possible to pretend to use a
+different syscall scheme to bypass restrictions&amp;nbsp;otherwise.&lt;/p&gt;
+&lt;p&gt;Assuming the bytecode is the way to go, there are three ways to write it.
+Either compile some code using &lt;em&gt;bpfc&lt;/em&gt;, construct the bytecode inline using
+macros, or use libseccomp for&amp;nbsp;convenience.&lt;/p&gt;
+&lt;p&gt;Using a compiler has some benefits over using just macros - it can check your
+code for simple mistakes and handles all the jumps correctly. This is important
+because all jump offsets are relative (and always positive to prevent loops) -
+it makes maintaining and editing rules pretty hard. The compiler itself doesn’t
+do much conversion however; it works with assembler-like source and converts
+each line into&amp;nbsp;bytecode.&lt;/p&gt;
+&lt;p&gt;The result of either the compilation or hand coding is very likely to be just a
+list of compares and jumps. Although straightforward, if you use macros it will
+still look something like&amp;nbsp;this:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span class="n"&gt;BPF_STMT&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;BPF_LD&lt;/span&gt;&lt;span class="o"&gt;+&lt;/span&gt;&lt;span class="n"&gt;BPF_W&lt;/span&gt;&lt;span class="o"&gt;+&lt;/span&gt;&lt;span class="n"&gt;BPF_ABS&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;arch_nr&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+&lt;span class="n"&gt;BPF_JUMP&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;BPF_JMP&lt;/span&gt;&lt;span class="o"&gt;+&lt;/span&gt;&lt;span class="n"&gt;BPF_JEQ&lt;/span&gt;&lt;span class="o"&gt;+&lt;/span&gt;&lt;span class="n"&gt;BPF_K&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;ARCH_NR&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+&lt;span class="n"&gt;BPF_STMT&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;BPF_RET&lt;/span&gt;&lt;span class="o"&gt;+&lt;/span&gt;&lt;span class="n"&gt;BPF_K&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;SECCOMP_RET_KILL&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;p&gt;Which compares the expected architectures to the one currently used and skips
+over kill instruction if they match. Not so great to&amp;nbsp;read.&lt;/p&gt;
+&lt;h2&gt;The easier way -&amp;nbsp;libseccomp&lt;/h2&gt;
+&lt;p&gt;Like each assembler language, the syscalls filtering can be abstracted a bit to
+provide nicer and simpler mechanisms in a high-level description. In case of
+seccomp that is done by &lt;a href="https://github.com/seccomp/libseccomp"&gt;libseccomp&lt;/a&gt;.
+It&amp;#8217;s a C library which takes descriptions of the rules and provides a much
+easier solution to writing your own description. While it doesn&amp;#8217;t provide full
+control over the resulting &lt;em&gt;bpf&lt;/em&gt; bytecode, it doesn&amp;#8217;t have to at the moment,
+since seccomp itself doesn&amp;#8217;t enable us to do anything else apart from analysing
+the call and choosing an answer. The result may even be better than the
+bytecode written by hand if any optimisation techniques are applied in the&amp;nbsp;future.&lt;/p&gt;
+&lt;p&gt;The interface is pretty simple. You initialise a filter, add some rules to it,
+then install the filter. Syscall arguments can be checked in simple ways when
+adding a rule. For example this will allow only &lt;em&gt;write()&lt;/em&gt;, &lt;em&gt;close()&lt;/em&gt; and
+program termination: (error checking&amp;nbsp;omitted)&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span class="n"&gt;ctx&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;seccomp_init&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;SCMP_ACT_KILL&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="n"&gt;seccomp_rule_add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;ctx&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;SCMP_ACT_ALLOW&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;SCMP_SYS&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;write&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="n"&gt;seccomp_rule_add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;ctx&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;SCMP_ACT_ALLOW&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;SCMP_SYS&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;close&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="n"&gt;seccomp_rule_add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;ctx&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;SCMP_ACT_ALLOW&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;SCMP_SYS&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;rt_sigreturn&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="n"&gt;seccomp_rule_add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;ctx&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;SCMP_ACT_ALLOW&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;SCMP_SYS&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;exit_group&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="n"&gt;seccomp_load&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;ctx&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="n"&gt;seccomp_release&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;ctx&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;p&gt;Short, simple and&amp;nbsp;effective.&lt;/p&gt;
+&lt;p&gt;In the next part I&amp;#8217;ll describe how to apply such rules to an existing
+application, like memcached and what tools to use to verify everything still
+works as&amp;nbsp;expected.&lt;/p&gt;</description><dc:creator xmlns:dc="http://purl.org/dc/elements/1.1/">viraptor</dc:creator><pubDate>Wed, 04 Feb 2015 12:00:00 +0000</pubDate><guid>tag:blog.viraptor.info,2015-02-04:post/seccomp-sandboxes-and-memcached-example-part-1</guid><category>memcache seccomp linux</category></item><item><title>Reducing a network problem to a file problem (fuzzing)</title><link>http://blog.viraptor.info/post/104373878281/reducing-a-network-problem-to-a-file-problem</link><description>&lt;p&gt;There&amp;#8217;s been a number of issues lately found by fuzzing input files
+(&lt;em&gt;strings&lt;/em&gt;, &lt;em&gt;lesspipe&lt;/em&gt;, various image issues, etc.), but these are all
+stateless apps / libraries. It&amp;#8217;s much easier to fuzz input for &lt;em&gt;strings&lt;/em&gt;
+for example, than client input to &lt;em&gt;mysql&lt;/em&gt; server. The
+&lt;a href="https://fuzzing-project.org/"&gt;fuzzing project&lt;/a&gt; is actually concentrating on
+local input only for now and keeps protocols (network and devices) out
+of scope. But provided we can agree to some compromises, it&amp;#8217;s possible
+to reduce many of those network communications to stateless file
+processing&amp;nbsp;problems.&lt;/p&gt;
+&lt;p&gt;Some kind of network fuzzing exercises will be easier than others. For
+example anything that uses stateless protocol by design will be easier
+than something that requires a lot of state, authentication, potential
+cache warmup, etc. Most &lt;span class="caps"&gt;UDP&lt;/span&gt; applications for example should be easier to
+fuzz than &lt;span class="caps"&gt;TCP&lt;/span&gt; ones, because they need to act on separate messages and
+preserve any state explicitly by design. It also matters a lot how well
+the application is designed. If it keeps a lot of magic global state
+around and you can&amp;#8217;t extract parts of functionality simply, then it&amp;#8217;s
+going to bring some&amp;nbsp;problems.&lt;/p&gt;
+&lt;p&gt;Let&amp;#8217;s look at one such candidate: &lt;span class="caps"&gt;UDP&lt;/span&gt; messages, no auth, functions with
+no state - &lt;strong&gt;systemd-resolve&lt;/strong&gt;, the dns resolver for systemd. While
+normally it initiates the queries, any host can send back a response
+that needs to be processed safely. In this case, let&amp;#8217;s try to fuzz only
+one very specific part of the code: message&amp;nbsp;parsing.&lt;/p&gt;
+&lt;p&gt;Instead of starting the actual daemon though and trying to send it
+messages, we can use the required parts and construct a new program that
+will be a self-contained stateless file processor. First, we can treat
+the whole systemd as a big library and provide our own &lt;em&gt;main()&lt;/em&gt; for it.
+This is actually what a lot of the &lt;em&gt;test-*&lt;/em&gt; applications in systemd
+already do. Here&amp;#8217;s a tiny file&amp;nbsp;parser:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span class="cp"&gt;#include &amp;quot;resolved-dns-packet.h&amp;quot;&lt;/span&gt;
+&lt;span class="cp"&gt;#include &amp;lt;stdio.h&amp;gt;&lt;/span&gt;
+&lt;span class="cp"&gt;#define BUFSIZE (DNS_PACKET_SIZE_MAX-100)&lt;/span&gt;
+
+&lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="nf"&gt;main&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;argc&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="kt"&gt;char&lt;/span&gt; &lt;span class="o"&gt;**&lt;/span&gt;&lt;span class="n"&gt;argv&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kt"&gt;char&lt;/span&gt; &lt;span class="n"&gt;buf&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;BUFSIZE&lt;/span&gt;&lt;span class="p"&gt;];&lt;/span&gt;
+    &lt;span class="kt"&gt;FILE&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="n"&gt;in&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+    &lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;l&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;res&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+    &lt;span class="n"&gt;DnsPacket&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="n"&gt;p&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+    &lt;span class="n"&gt;in&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;fopen&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;argv&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt; &lt;span class="s"&gt;&amp;quot;r&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="n"&gt;l&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;fread&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;buf&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;BUFSIZE&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;in&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="n"&gt;printf&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;quot;read: %i bytes&lt;/span&gt;&lt;span class="se"&gt;\n&lt;/span&gt;&lt;span class="s"&gt;&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;l&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+    &lt;span class="n"&gt;dns_packet_new&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;p&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;DNS_PROTOCOL_DNS&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="n"&gt;p&lt;/span&gt;&lt;span class="o"&gt;-&amp;gt;&lt;/span&gt;&lt;span class="n"&gt;size&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+    &lt;span class="n"&gt;res&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;dns_packet_append_blob&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;p&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;buf&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;l&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nb"&gt;NULL&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="n"&gt;printf&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;quot;append_blob: %i&lt;/span&gt;&lt;span class="se"&gt;\n&lt;/span&gt;&lt;span class="s"&gt;&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;res&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+    &lt;span class="n"&gt;res&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;dns_packet_extract&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;p&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="n"&gt;dns_packet_unref&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;p&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="n"&gt;printf&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;quot;%i&lt;/span&gt;&lt;span class="se"&gt;\n&lt;/span&gt;&lt;span class="s"&gt;&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;res&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;p&gt;The &lt;em&gt;dns_*&lt;/em&gt; functions are provided by &lt;em&gt;systemd-resolve&lt;/em&gt; and here are
+being called in a way close to what the application does in real life.
+Specifically, if this program crashes then we can be close to certain
+that the real app will also crash - and that&amp;#8217;s what we care about&amp;nbsp;most.&lt;/p&gt;
+&lt;p&gt;Now we can just add a new entry to &lt;em&gt;Makefile.am&lt;/em&gt; to actually build&amp;nbsp;it:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;tests += \
+       test-dns-parser
+test_dns_parser_SOURCES = \
+       src/resolve/resolved-dns-packet.h \
+       src/resolve/resolved-dns-packet.c \
+       src/resolve/resolved-dns-question.h \
+       src/resolve/resolved-dns-question.c \
+       src/resolve/resolved-dns-answer.h \
+       src/resolve/resolved-dns-answer.c \
+       src/resolve/resolved-dns-rr.h \
+       src/resolve/resolved-dns-rr.c \
+       src/resolve/resolved-dns-domain.h \
+       src/resolve/resolved-dns-domain.c \
+       src/resolve/test-dns-parser.c
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;p&gt;This app can now be easily checked with most common fuzzers like &lt;em&gt;&lt;span class="caps"&gt;AFL&lt;/span&gt;&lt;/em&gt;
+for example. Just &lt;strong&gt;&lt;span class="caps"&gt;CC&lt;/span&gt;=&amp;#8230;/afl-gcc ./configure &amp;amp;&amp;amp; make test-dns-parser&lt;/strong&gt;
+and run the fuzzer on it. The printed out information is only for quick
+verification of later&amp;nbsp;results.&lt;/p&gt;
+&lt;p&gt;Sample input vectors can be created from wireshark network captures, or
+even just &lt;a href="https://gist.github.com/viraptor/a476687b339c8f726533"&gt;some trivial generator&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;What about the compromises then? The main issue is about the tested
+scope. As seen in the resolver&amp;#8217;s example, the only tested parts are
+parsing and a bit of the memory management. That&amp;#8217;s not a lot and it
+doesn&amp;#8217;t involve any of the business logic dealing with caches,
+constructing responses, etc. It only checks whether a random message
+arriving at this port is going to crash the program while it&amp;#8217;s being
+parsed into memory structures, or&amp;nbsp;not.&lt;/p&gt;
+&lt;p&gt;Is it worth it in the end? The systemd-resolve case seems to show it is.
+There was an assert abort case (&lt;a href="http://lists.freedesktop.org/archives/systemd-devel/2014-November/025285.html"&gt;function result not set&lt;/a&gt;),
+null pointer read (&lt;a href="http://lists.freedesktop.org/archives/systemd-devel/2014-November/025282.html"&gt;string vectors api misuse&lt;/a&gt;)
+and one &lt;a href="http://lists.freedesktop.org/archives/systemd-devel/2014-November/025284.html"&gt;infinite loop&lt;/a&gt;
+hiding in the parsing code. All fixed upstream now. Even though they
+didn&amp;#8217;t allow arbitrary code execution, they&amp;#8217;d be trivial to use to
+(remotely!) DoS a server by using 100% &lt;span class="caps"&gt;CPU&lt;/span&gt; and stopping any hostname&amp;nbsp;resolution.&lt;/p&gt;</description><dc:creator xmlns:dc="http://purl.org/dc/elements/1.1/">viraptor</dc:creator><pubDate>Fri, 05 Dec 2014 12:57:00 +0000</pubDate><guid>tag:blog.viraptor.info,2014-12-05:post/104373878281/reducing-a-network-problem-to-a-file-problem</guid><category>fuzzing</category><category>programming</category><category>linux</category><category>systemd</category><category>afl</category></item><item><title>Things that go boom and hang with vagrant and arch</title><link>http://blog.viraptor.info/post/78913741974/things-that-go-boom-and-hang-with-vagrant-and-arch</link><description>&lt;p&gt;Here&amp;#8217;s a list of things that currently fail when trying to run vagrant
+under Arch. Hopefully I hit most of the keywords from errors and you&amp;#8217;re
+reading this because you ran into one of&amp;nbsp;those.&lt;/p&gt;
+&lt;h3&gt;Vagrant is not an official Arch&amp;nbsp;package.&lt;/h3&gt;
+&lt;p&gt;It&amp;#8217;s in &lt;span class="caps"&gt;AUR&lt;/span&gt; though - https://aur.archlinux.org/packages/vagrant/ (vote
+for it!) and `pacaur -S vagrant` will happily install&amp;nbsp;it.&lt;/p&gt;
+&lt;h3&gt;Wrong guest additions&amp;nbsp;version&lt;/h3&gt;
+&lt;p&gt;Arch will most likely install virtualbox with a different api than guest
+additions in the box you downloaded from the internet. This is easily
+fixable by either creating your own compatible box, or adding a plugin&amp;nbsp;via:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;vagrant plugin install vagrant-vbguest
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;p&gt;This will make sure that after every new vm is started, the guest
+additions version will be checked. If it doesn&amp;#8217;t match or isn&amp;#8217;t
+installed, guest additions will be downloaded and forced to&amp;nbsp;comply.&lt;/p&gt;
+&lt;p&gt;If you provide the iso, the addins will be installed from the &lt;span class="caps"&gt;CD&lt;/span&gt;. No,
+the internet doesn&amp;#8217;t know how to make sure the guest additions &lt;span class="caps"&gt;CD&lt;/span&gt; is
+mounted automatically. No, you can&amp;#8217;t access the &amp;#8220;Install guest
+additions&amp;#8221; menu unless you use the gui for the vm. No, it doesn&amp;#8217;t make&amp;nbsp;sense.&lt;/p&gt;
+&lt;h3&gt;Reading from shared folders&amp;nbsp;hangs&lt;/h3&gt;
+&lt;p&gt;If reading from shared folders causes freezes and stracing results in
+just a looped call to `getdents()`, you have incompatible guest
+additions. Problem described
+&lt;a href="https://bbs.archlinux.org/viewtopic.php?id=169953"&gt;here&lt;/a&gt;. Solution -
+see&amp;nbsp;above.&lt;/p&gt;
+&lt;h3&gt;Rebooting the &lt;span class="caps"&gt;VM&lt;/span&gt; results in a&amp;nbsp;freeze&lt;/h3&gt;
+&lt;p&gt;If you don&amp;#8217;t update guest additions, shared folders don&amp;#8217;t work. If you
+do, the host will freeze during the bootup after the first reset. Yes it
+does. That&amp;#8217;s&amp;nbsp;all.&lt;/p&gt;
+&lt;h3&gt;There&amp;#8217;s a kvm module for&amp;nbsp;vagrant!&lt;/h3&gt;
+&lt;p&gt;Some sanity can be hopefully restored by using &lt;span class="caps"&gt;KVM&lt;/span&gt;/libvirt instead of
+vbox. There are two modules -
+&lt;a href="https://github.com/adrahon/vagrant-kvm"&gt;vagrant-kvm&lt;/a&gt; and
+&lt;a href="https://github.com/pradels/vagrant-libvirt"&gt;vagrant-libvirt&lt;/a&gt;. Both will
+fail to&amp;nbsp;install.&lt;/p&gt;
+&lt;h3&gt;How to install&amp;nbsp;vagrant-kvm&lt;/h3&gt;
+&lt;p&gt;Trying to simply run `vagrant plugin install vagrant-kvm` will result&amp;nbsp;in:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;Installing the &amp;#39;vagrant-kvm&amp;#39; plugin. This can take a few minutes...
+...in `run&amp;#39;: ERROR: Failed to build gem native extension. (Gem::Installer::ExtensionBuildError)
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;p&gt;The log in `mkmf.log` will tell you&amp;nbsp;that:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;/usr/..../libvirt.so: undefined reference to `curl_global_init@CURL_OPENSSL_4&amp;#39;
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;p&gt;(and many other functions too). The problem is described
+&lt;a href="https://bbs.archlinux.org/viewtopic.php?pid=1387378"&gt;here&lt;/a&gt; and all you
+need to do is move away the following files from
+`/opt/vagrant/embedded/lib/`: `libcurl.so`, `libcurl.so.4`,
+`libcurl.so.4&amp;#8230;.` (whichever version you have at the moment). Finally
+move `/opt/vagrant/embedded/lib/pkgconfig/libcurl.pc`. Now
+`vagrant-kvm` will install succesfully and you can move the files back
+into the original&amp;nbsp;place.&lt;/p&gt;
+&lt;h3&gt;Vagrant-kvm doesn&amp;#8217;t work because &amp;#8220;authentication failed:&amp;nbsp;polkit&amp;#8221;&lt;/h3&gt;
+&lt;p&gt;Of course it won&amp;#8217;t. Arch simply installs libvirt and leaves you holding
+the baby. Read &lt;a href="https://wiki.archlinux.org/index.php/Libvirt#Configuration"&gt;the arch wiki&lt;/a&gt; and
+setup the polkit rules. Also you have to create the libvirt group, even
+though the wiki lists it as an alternative&amp;nbsp;way.&lt;/p&gt;
+&lt;h3&gt;Vagrant-kvm doesn&amp;#8217;t work because &amp;#8220;Failed to connect socket to&amp;nbsp;&amp;#8230;&amp;#8221;&lt;/h3&gt;
+&lt;p&gt;Restart your libvirt&amp;nbsp;using:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;sudo systemctl restart libvirtd
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;h3&gt;Vagrant-kvm doesn&amp;#8217;t work becuase &amp;#8220;Could not create file: Permission&amp;nbsp;denied&amp;#8221;&lt;/h3&gt;
+&lt;p&gt;At some point when you weren&amp;#8217;t looking something changed the owner of
+`\~/.vagrant.d/tmp/storage-pool` to root. That means the process
+spawning the vm is not running as you anymore and most likely you
+removed the `rx&amp;#8217; rights from &amp;#8220;others&amp;#8221; on your home directory. For this
+one I don&amp;#8217;t have a good solution anymore. You&amp;#8217;ll have to give &amp;#8216;x&amp;#8217; rights
+on your home either to all (`chmod o+x \~`), or just to `users` and
+`libvirt` using the&amp;nbsp;acls.&lt;/p&gt;
+&lt;h3&gt;Vagrant-kvm doesn&amp;#8217;t work because &amp;#8220;VagrantPlugins::ProviderKvm::Action::&lt;span class="caps"&gt;NFS&lt;/span&gt;&amp;#8221;&lt;/h3&gt;
+&lt;p&gt;You&amp;#8217;re right, it doesn&amp;#8217;t. You have to repackage vagrant-kvm from master
+branch, because the fix is not released yet (as of March 2014). Read the
+&lt;a href="https://github.com/adrahon/vagrant-kvm/issues/158"&gt;upstream issue&lt;/a&gt; and
+follow the gem repackaging&amp;nbsp;instructions.&lt;/p&gt;</description><dc:creator xmlns:dc="http://purl.org/dc/elements/1.1/">viraptor</dc:creator><pubDate>Sat, 08 Mar 2014 14:59:00 +0000</pubDate><guid>tag:blog.viraptor.info,2014-03-08:post/78913741974/things-that-go-boom-and-hang-with-vagrant-and-arch</guid><category>vagrant</category><category>kvm</category><category>libvirt</category><category>arch</category><category>linux</category><category>fail</category><category>freeze</category><category>hang</category></item><item><title>Ubuntu unattended upgrades the salt way</title><link>http://blog.viraptor.info/post/75262988169/ubuntu-unattended-upgrades-the-salt-way</link><description>&lt;p&gt;There are many ways to turn on the unattended upgrades in Ubuntu.
+Creating files in /etc/apt/apt.conf.d, reconfiguring the package by
+hand, reinstalling after debconf,&amp;nbsp;etc.&lt;/p&gt;
+&lt;p&gt;Here&amp;#8217;s a simple way to do it with salt without breaking the Ubuntu /
+debconf&amp;nbsp;integration:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;unattended-upgrades:
+  debconf.set:
+    - data:
+        &amp;#39;unattended-upgrades/enable_auto_updates&amp;#39;:
+          type: boolean
+          value: &amp;quot;true&amp;quot;
+
+  cmd.wait:
+    - name: &amp;quot;dpkg-reconfigure unattended-upgrades&amp;quot;
+    - watch:
+      - debconf: unattended-upgrades
+    - env:
+        DEBIAN_FRONTEND: noninteractive
+        DEBCONF_NONINTERACTIVE_SEEN: &amp;quot;true&amp;quot;
+&lt;/pre&gt;&lt;/div&gt;</description><dc:creator xmlns:dc="http://purl.org/dc/elements/1.1/">viraptor</dc:creator><pubDate>Sun, 02 Feb 2014 03:25:00 +0000</pubDate><guid>tag:blog.viraptor.info,2014-02-02:post/75262988169/ubuntu-unattended-upgrades-the-salt-way</guid><category>salt</category><category>ubuntu</category><category>unattended upgrade</category></item><item><title>Are your data archives append-only?</title><link>http://blog.viraptor.info/post/62559740222/are-your-data-archives-append-only</link><description>&lt;p&gt;Any long-term data archives you keep - backups, copies of logs, code
+repositories, audit entries, etc. Are they append-only? I don&amp;#8217;t mean
+from the perspective of the account owner. Of course the operator is
+able to do whatever he wants with those files, including deleting&amp;nbsp;them.&lt;/p&gt;
+&lt;p&gt;But what about your servers? I&amp;#8217;ve seen many backup manuals, or even
+published scripts which pretty much require you to setup the S3 account
+and that&amp;#8217;s it. They&amp;#8217;ll manage the files inside and make sure everything
+is updated as needed. But there&amp;#8217;s a problem with that strategy - what if
+someone else gains control of your server? What can they do to your&amp;nbsp;archives?&lt;/p&gt;
+&lt;p&gt;Can they, in one go, wipe both your current database and all the
+available backups using credentials stored locally? Or all of the logs
+from this and other services? Can they wipe the code repositories using
+your deployment keys? Can they read all your database backups with every
+past and present account still in there? Guessing from many tutorials
+and articles, there are lots of production services out there where the
+answer is &amp;#8220;yes&amp;#8221; to all. Sometimes it&amp;#8217;s not even an issue with the admins
+not trying hard enough - sometimes services themselves are really not
+prepared for protection from that kind of behaviour. Many providers
+simply don&amp;#8217;t offer any other ways of accessing their accounts apart from
+a single user+key combination giving global access to&amp;nbsp;everything.&lt;/p&gt;
+&lt;p&gt;There are ways to provide some level of protection even without any
+support from the service provider, but it&amp;#8217;s much easier if the access
+control is already built-in. For example when uploading data into S3,
+everything that&amp;#8217;s needed for good protection is already provided. &lt;span class="caps"&gt;IAM&lt;/span&gt;
+gives you the possibility to create an account per service, or even per
+host. User permissions allow you to give only as much access as needed
+for your use case. That means your remote backup script shouldn&amp;#8217;t need
+any more privileges than PutObject on some specific object (in case
+you&amp;#8217;re using versioned buckets), or on a bucket (without versioning).
+The second case requires that you also assign unpredictable names (for
+example random suffixes) to the files, so that they cannot be destroyed
+by&amp;nbsp;overwriting.&lt;/p&gt;
+&lt;p&gt;Here&amp;#8217;s an example of a user policy for S3 bucket without&amp;nbsp;versioning:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;{
+  &amp;quot;Version&amp;quot;: &amp;quot;2012-10-17&amp;quot;,
+  &amp;quot;Statement&amp;quot;: [
+    {
+      &amp;quot;Action&amp;quot;: [
+        &amp;quot;s3:PutObject&amp;quot;
+      ],
+      &amp;quot;Sid&amp;quot;: &amp;quot;Stmt1375779806000&amp;quot;,
+      &amp;quot;Resource&amp;quot;: [
+        &amp;quot;arn:aws:s3:::blah-database-backups/*&amp;quot;
+      ],
+      &amp;quot;Effect&amp;quot;: &amp;quot;Allow&amp;quot;
+    }
+  ]
+}
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;p&gt;But that&amp;#8217;s not all. Even if you have a single account, there&amp;#8217;s still a
+way to limit the potential damage to some extent. Instead of using the
+same account for upload and long-term storage of the files, get two
+accounts. Upload to the first one and keep it around only for that
+purpose. For long-term storage, set up a machine which is completely
+separated from the users (maybe even rejects all incomming connections)
+and make sure all files are moved to the second account as soon as&amp;nbsp;possible.&lt;/p&gt;
+&lt;p&gt;That kind of setup is not perfect and still allows the attacker to
+replace files that have not been moved, or download files which wouldn&amp;#8217;t
+normally be accessible from the local filesystem. But the time window
+and amount of data that may be impacted is much lower. There&amp;#8217;s also
+still the possiblity to encrypt the data locally using a public key
+(which can be safely stored on the server) in order to protect the&amp;nbsp;information.&lt;/p&gt;
+&lt;p&gt;So, if I got access to one of your servers and its backup system&amp;#8230; what
+would I be able to&amp;nbsp;achieve?&lt;/p&gt;</description><dc:creator xmlns:dc="http://purl.org/dc/elements/1.1/">viraptor</dc:creator><pubDate>Sun, 29 Sep 2013 10:35:00 +0000</pubDate><guid>tag:blog.viraptor.info,2013-09-29:post/62559740222/are-your-data-archives-append-only</guid><category>backup</category><category>security</category><category>devops</category></item><item><title>Issues with preseeding dbconfig</title><link>http://blog.viraptor.info/post/60000186508/issues-with-preseeding-dbconfig</link><description>&lt;p&gt;There&amp;#8217;s an interesting side effect to way Debian-like systems handle the
+database configuration for various packages. Instead of each package
+setting the connection parameters on their own, they reuse the
+abstraction provided by package &amp;#8216;dbconfig-common&amp;#8217;. This is all fine in
+theory, but unfortunately dbconfig doesn&amp;#8217;t seem to behave very well with
+values pre-set before&amp;nbsp;installation.&lt;/p&gt;
+&lt;p&gt;It should check the debconf settings called
+&amp;#8220;\&amp;lt;package&gt;/internal/skip-preseed&amp;#8221; and ignore all the setup and leave
+the configuration up to other tools. (configuration management!) But
+that&amp;#8217;s not what happens at the start. For example package &amp;#8220;phpmyadmin&amp;#8221; -
+it depends on &amp;#8220;dbconfig-common&amp;#8221; and I didn&amp;#8217;t want to this way of
+configuration. But here&amp;#8217;s the catch: setting
+&amp;#8220;phpmyadmin/internal/skip-preseed&amp;#8221; to &amp;#8220;true&amp;#8221; didn&amp;#8217;t work. The package is
+installed with a randomly generated&amp;nbsp;password.&lt;/p&gt;
+&lt;p&gt;There&amp;#8217;s a way to work around this by splitting the installation into
+steps though. First install &amp;#8220;dbconfig-common&amp;#8221;, then set the values, then
+install the package. The way it works in salt (for example)&amp;nbsp;is:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;dbconfig-common:
+  pkg.installed
+phpmyadmin:
+  pkg:
+    - installed
+    - require:
+      - debconf: phpmyadmin
+  debconf.set:
+    - require:
+      - pkg: dbconfig-common
+    - data:
+        &amp;#39;phpmyadmin/internal/skip-preseed&amp;#39;:
+          type: boolean
+          value: true
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;p&gt;Then it all works again. Hopefully also for packages other than&amp;nbsp;phpmyadmin.&lt;/p&gt;</description><dc:creator xmlns:dc="http://purl.org/dc/elements/1.1/">viraptor</dc:creator><pubDate>Mon, 02 Sep 2013 05:31:37 +0000</pubDate><guid>tag:blog.viraptor.info,2013-09-02:post/60000186508/issues-with-preseeding-dbconfig</guid><category>preseed</category><category>ubuntu</category><category>salt</category><category>automation</category></item><item><title>Constructing a (linux) home backup system</title><link>http://blog.viraptor.info/post/51516551067/constructing-a-linux-home-backup-system</link><description>&lt;p&gt;I&amp;#8217;ve got a couple of Linux machines that need a transparent backup
+solution at home. Transparent as in - they should happen all the time,
+without asking, without notification, without any interaction. Ideally
+it shouldn&amp;#8217;t run on the client either just to avoid issues with system
+updates. Making it all server-side allows me also to backup my
+girlfriend&amp;#8217;s machine without explaining the setup - which is great when
+even periodic upgrades are a pain to&amp;nbsp;enforce.&lt;/p&gt;
+&lt;p&gt;Another couple of requirements I had&amp;nbsp;were:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;backing up in local network (I don&amp;#8217;t have enough bandwidth to backup
+    remotely all the&amp;nbsp;time)&lt;/li&gt;
+&lt;li&gt;saving storage space where files don&amp;#8217;t&amp;nbsp;change&lt;/li&gt;
+&lt;li&gt;able to run on a small device (I&amp;#8217;ve got a
+    &lt;a href="http://www.tonidoplug.com/"&gt;TonidoPlug&lt;/a&gt;&amp;nbsp;ready)&lt;/li&gt;
+&lt;li&gt;directory-based rather than fs-based (I&amp;#8217;ve got a number of VMs I
+    really don&amp;#8217;t want to waste time backing&amp;nbsp;up)&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;Unfortunately there aren&amp;#8217;t many good, ready solutions and there aren&amp;#8217;t
+many choices in general either. Most solutions fall into one of the
+following groups: trivial copy, archiving solutions, rsync-like and
+full-blown&amp;nbsp;systems.&lt;/p&gt;
+&lt;p&gt;To be honest, maybe a big system like bacula can do what I need&amp;#8230; but
+with it having more components that I have local hosts, I didn&amp;#8217;t want to
+invest that much time in learning the&amp;nbsp;configuration.&lt;/p&gt;
+&lt;p&gt;At small companies where I set up backups, I was happy with &lt;span class="caps"&gt;DAR&lt;/span&gt;. Full
+backups split into volumes of a given size and stored on removable disks
+weekly, with daily diffs stored locally - perfect. Here it won&amp;#8217;t work -
+I can&amp;#8217;t saturate the network or disk io every couple of hours. I really
+don&amp;#8217;t want to deal with replacing removable disks. Some more intelligent
+solution is&amp;nbsp;required.&lt;/p&gt;
+&lt;h3&gt;Enter&amp;nbsp;rsnapshot&lt;/h3&gt;
+&lt;p&gt;&lt;a href="http://www.rsnapshot.org/"&gt;Rsnapshot&lt;/a&gt; is an interesting mix between
+systems that understand backup schedules and a minimal backup utility.
+Rsnapshot can copy files from a remote host using rsync (and ssh for
+example). Then, it knows how to hard-link files that didn&amp;#8217;t change to
+avoid wasting both bandwidth and storage. It also knows how to rotate
+backup directories when new backups come in and how to promote backups
+between&amp;nbsp;levels.&lt;/p&gt;
+&lt;p&gt;The schedule and promotion is done in a very simple way too. Since
+rsnapshot needs to be run from some scheduler like cron, it takes the
+name of the backup as a parameter. This can be for example &amp;#8220;daily&amp;#8221;,
+&amp;#8220;weekly&amp;#8221;, &amp;#8220;purple&amp;#8221;, or whatever you want to call it. What&amp;#8217;s important is
+the order in rsnapshot config file - only the first entry will get
+copied from source, others will get promoted from the &amp;#8220;upper&amp;#8221; level&amp;nbsp;locally.&lt;/p&gt;
+&lt;p&gt;This is pretty much exactly what was needed. For the remote copy, ssh
+can be configured to use a password-less key to authenticate on the
+remote hosts. In case it&amp;#8217;s possible to access the backup server from the
+internet, making sure it &lt;a href="http://technokracy.net/2011/01/07/root_sudo_rsnapshot/"&gt;can run only
+rsync&lt;/a&gt; is a good
+idea too. For paranoid people, this can be also locked down with
+apparmor or selinux to deny anything apart from read-only&amp;nbsp;access.&lt;/p&gt;
+&lt;h3&gt;Sample&amp;nbsp;configuration&lt;/h3&gt;
+&lt;p&gt;So what does this look like in&amp;nbsp;practice?&lt;/p&gt;
+&lt;p&gt;The server which collects the backups has rsnapshot and rsync installed.
+It also has a password-less ssh key created: just run &lt;em&gt;ssh-keygen&lt;/em&gt; and
+copy the resulting &lt;em&gt;id_rsa.pub&lt;/em&gt; into client machine&amp;#8217;s
+&lt;em&gt;\~/.ssh/authorized_keys&lt;/em&gt;.&lt;/p&gt;
+&lt;p&gt;It also has a separate partition available for each backup. In my case
+they&amp;#8217;re mounted under &lt;em&gt;/media/disk1partX&lt;/em&gt;.&lt;/p&gt;
+&lt;p&gt;Now, each machine which needs backing up requires a configuration file.
+I put them all in my plug&amp;#8217;s root directory:
+&lt;em&gt;/root/rsnapshot_configs/xxx.&lt;/em&gt; Each machine looks almost the same. For
+example host &lt;em&gt;walker&lt;/em&gt; has &lt;em&gt;/root/rsnapshot_configs/walker&lt;/em&gt;:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;config_version    1.2
+snapshot_root    /media/disk1part2/rsnapshot
+
+cmd_rsync    /usr/bin/rsync
+cmd_ssh    /usr/bin/ssh
+cmd_du    /usr/bin/du
+exclude_file    /root/rsnapshot_configs/walker.exclude
+
+retain    hourly    5
+retain    daily    7
+retain    weekly    5
+
+backup    viraptor@walker.local:/home/viraptor    viraptor
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;p&gt;This configuration says that &lt;em&gt;/media/disk1part2/rsnapshot/viraptor&lt;/em&gt; will
+keep copies of &lt;em&gt;/home/viraptor&lt;/em&gt; (minus some excludes like &lt;em&gt;.cache&lt;/em&gt;,
+&lt;em&gt;.steam&lt;/em&gt;, etc.) - 5 hourly ones, then 7 daily ones, then 5 weekly ones.
+All files which have not changed will be hard-linked and no space will
+be wasted on exact duplicates. The backup is taken from the host
+walker.local (thanks &lt;a href="http://avahi.org/"&gt;Avahi&lt;/a&gt;!).&lt;/p&gt;
+&lt;p&gt;But that&amp;#8217;s only the definition of what&amp;#8230; what about when? Crontab
+entries are what actually triggers the rsnapshot actions and they live
+in &lt;em&gt;/etc/cron.d&lt;/em&gt;. The content&amp;nbsp;is:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;55 */2 * * * root (/bin/ping -c1 walker.local &amp;gt;/dev/null 2&amp;gt;/dev/null) &amp;amp;&amp;amp;
+    /usr/bin/rsnapshot -c /root/rsnapshot_configs/walker hourly
+20 3 * * * root /usr/bin/rsnapshot -c /root/rsnapshot_configs/walker daily
+20 4 * * 1 root /usr/bin/rsnapshot -c /root/rsnapshot_configs/walker weekly
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;p&gt;This means that every 2 hours if the host is on (it most likely isn&amp;#8217;t),
+rsnapshot will take another hourly copy. Then every day in the morning
+it will promote an old hourly snapshot to daily and once a week it will
+promote daily to&amp;nbsp;weekly.&lt;/p&gt;
+&lt;h3&gt;Summary&lt;/h3&gt;
+&lt;p&gt;All simple and easy. There&amp;#8217;s no specific recovery procedure involved,
+because all backups are available as normal files on the server. It&amp;#8217;s
+actually easy to browse the old entries in case only one or two files
+need recovering. And in case of serious issues - just rsync everything
+back from the last snapshot. So far I&amp;#8217;m very happy with&amp;nbsp;it.&lt;/p&gt;
+&lt;p&gt;One thing to watch out for is the exclusions file in case you don&amp;#8217;t have
+a massive harddrive available. If you happen to install Steam with some
+games you may start getting emails about failed backups&amp;#8230; but there&amp;#8217;s
+only so many copies of portal or tf2 that you&amp;#8217;ll need in your life - you
+probably don&amp;#8217;t need them in the backups unless you have lots of space.
+&lt;span class="caps"&gt;VM&lt;/span&gt; images which change all the time are also very bad candidates for
+backing up with rsnapshot. Every modification there will need a
+separate, complete&amp;nbsp;copy.&lt;/p&gt;
+&lt;p&gt;With a &amp;#8220;normal&amp;#8221; developer-style usage the size of old copies is close to
+none. Currently, my last copy is &lt;span class="caps"&gt;22GB&lt;/span&gt;, but all previous snapshots and
+modifications add only &lt;span class="caps"&gt;2GB&lt;/span&gt; to&amp;nbsp;that.&lt;/p&gt;</description><dc:creator xmlns:dc="http://purl.org/dc/elements/1.1/">viraptor</dc:creator><pubDate>Tue, 28 May 2013 10:12:00 +0000</pubDate><guid>tag:blog.viraptor.info,2013-05-28:post/51516551067/constructing-a-linux-home-backup-system</guid><category>backup</category><category>linux</category><category>rsync</category><category>rsnapshot</category></item><item><title>SIP testing (rescued from stackoverflow)</title><link>http://blog.viraptor.info/post/51192360154/sip-testing-rescued-from-stackoverflow</link><description>&lt;p&gt;Just a popular stackoverflow question &lt;span class="amp"&gt;&amp;amp;&lt;/span&gt; answer which was deleted as not
+constructive even with 10+ score and thousands of views (by a mod, so
+can&amp;#8217;t vote to revert - thanks!) Keep in mind that it&amp;#8217;s from 2009 without
+later&amp;nbsp;reviews.&lt;/p&gt;
+&lt;h2&gt;Question:&lt;/h2&gt;
+&lt;p&gt;I am searching for a tool that tests
+&lt;a href="http://en.wikipedia.org/wiki/Session_Initiation_Protocol"&gt;&lt;span class="caps"&gt;SIP&lt;/span&gt;&lt;/a&gt; calls. A
+platform that makes a call from &lt;span class="caps"&gt;SIP&lt;/span&gt; device A to &lt;span class="caps"&gt;SIP&lt;/span&gt; device B and reports&amp;nbsp;results&amp;#8230;&lt;/p&gt;
+&lt;p&gt;Any idea? A simulation platform would be&amp;nbsp;ideal.&lt;/p&gt;
+&lt;h2&gt;My&amp;nbsp;answer:&lt;/h2&gt;
+&lt;p&gt;There are many solutions. Some more broken than others. Here&amp;#8217;s a quick
+summary of what I&amp;#8217;ve found while looking for a base for a proper
+automated testing&amp;nbsp;solution.&lt;/p&gt;
+&lt;h3&gt;&lt;a href="http://sipp.sourceforge.net/"&gt;SIPp&lt;/a&gt;&lt;/h3&gt;
+&lt;p&gt;It&amp;#8217;s ok if you want only a single dialog at a time. What doesn&amp;#8217;t work
+here is complex scenarios where you need to synchronise 2 call legs, do
+registration, call and presence in the same scenario. If you go this
+way, you&amp;#8217;ll end up with running multiple sipp scenarios for each
+conversation element separately. Sipp also doesn&amp;#8217;t scale at all for
+media transfers. Even though it&amp;#8217;s multithreaded, something stops it from
+running concurrently - if you look at &lt;em&gt;htop&lt;/em&gt; for example, you&amp;#8217;ll see
+that sipp never crosses the 100% line. Around 50 media calls it starts
+to cut audio and take all &lt;span class="caps"&gt;CPU&lt;/span&gt; of the&amp;nbsp;machine.&lt;/p&gt;
+&lt;p&gt;It can sometimes lose track of what&amp;#8217;s happening, some packets which
+don&amp;#8217;t even belong to the call really can result in a failed test. It&amp;#8217;s
+got some silly bugs too, like case-sensitive comparing of the&amp;nbsp;headers.&lt;/p&gt;
+&lt;h3&gt;&lt;a href="http://sipper.agnity.com/"&gt;SIPr/sipper&lt;/a&gt;&lt;/h3&gt;
+&lt;p&gt;Ruby-based solution where you have to write your own scenarios in Ruby.
+It&amp;#8217;s got its own &lt;span class="caps"&gt;SIP&lt;/span&gt; stack and lots of tests. While it&amp;#8217;s generally good
+and handles a lot of complex scenarios nicely, its design is terrible in
+my opinion. Bugs are hard to track down and after a week I had &gt;10
+patches that I needed just to make it do basic stuff. Later I learned
+that some of the scenarios should have been written in a slightly
+different way, but SIPr developers were not really responsive and it
+took a lot of time to find out about it. There was no good documentation
+either. Synchronising actions of many agents is a hard problem, since
+they&amp;#8217;d rather use an event-based, but still single-threaded approach&amp;#8230;
+it just makes you concentrate too much on &amp;#8220;what order can this happen in
+and do I handle it correctly&amp;#8221; and worrying about sync/async actions,
+rather than writing the actual&amp;nbsp;test.&lt;/p&gt;
+&lt;h3&gt;&lt;a href="http://www.touchstone-inc.com/winsip.php"&gt;WinSIP&lt;/a&gt;&lt;/h3&gt;
+&lt;p&gt;Commercial solution. Never tested it properly since the basic
+functionality is missing from the evaluation version and it&amp;#8217;s hard to
+spend that much money on something you&amp;#8217;re not sure&amp;nbsp;works&amp;#8230;&lt;/p&gt;
+&lt;h3&gt;&lt;a href="http://www.cafesip.org/projects/sipunit/"&gt;SipUnit&lt;/a&gt;&lt;/h3&gt;
+&lt;p&gt;Java-based solution reusing Jain-&lt;span class="caps"&gt;SIP&lt;/span&gt; stack. It can do almost any
+scenario and is fairly good. It tries to make everything non-blocking /
+action based leading to a similar situation SIPr has, but in this case
+it&amp;#8217;s trivial to make it parallel / threaded so it&amp;#8217;s much easier to deal
+with. It has its own share of bugs, so not everything works well in the
+vanilla package, but most of the stuff is patchable. The developers seem
+to be busy with other projects, so it&amp;#8217;s not updated for a long time. If
+you need transfers, presence, dialog-info, custom messages, &lt;span class="caps"&gt;RTP&lt;/span&gt;
+handling, etc. - you&amp;#8217;ll have to write your own modifications to support
+them. It is not good for performance testing though - each session on
+the test client side is rather heavy compared to the typical server side
+processing. That means you&amp;#8217;ll most likely need a number of hosts doing
+the testing per one&amp;nbsp;server/proxy.&lt;/p&gt;
+&lt;p&gt;If you&amp;#8217;re a Java-hater like me, it can be used in a simple way from
+Jython, JRuby or any other &lt;span class="caps"&gt;JVM&lt;/span&gt;&amp;nbsp;language.&lt;/p&gt;
+&lt;p&gt;In the end, I chose SIPunit as the least broken/evil/unusable solution.
+It is by no means perfect, but&amp;#8230; it works in most cases. If I was doing
+the project once again with all this knowledge, I&amp;#8217;d probably reuse SIPp
+configurations and try to write my own solution that uses proper
+threading - but I guesstimate it&amp;#8217;s at least a ½ year project for one
+person, to make it good enough for&amp;nbsp;production.&lt;/p&gt;</description><dc:creator xmlns:dc="http://purl.org/dc/elements/1.1/">viraptor</dc:creator><pubDate>Fri, 24 May 2013 11:38:00 +0000</pubDate><guid>tag:blog.viraptor.info,2013-05-24:post/51192360154/sip-testing-rescued-from-stackoverflow</guid><category>sip</category><category>stackoverflow</category><category>testing</category><category>deletionism</category></item><item><title>Setting up Flashcache the hard way and some talk about initramfs</title><link>http://blog.viraptor.info/post/45310603661/setting-up-flashcache-the-hard-way-and-some-talk</link><description>&lt;p&gt;If you follow the latest versions of&amp;#8230; everything and tried to install
+flashcache you probably noticed that none of the current guides are
+correct regarding how to install it. Or they are mostly correct but with
+some bits missing. So here&amp;#8217;s an attempt to do a refreshed guide. I&amp;#8217;m
+using kernel version &lt;strong&gt;3.7.10&lt;/strong&gt; and mkinitcpio version &lt;strong&gt;0.13.0&lt;/strong&gt; (this
+actually matters, the interface for adding hooks and modules has&amp;nbsp;changed).&lt;/p&gt;
+&lt;p&gt;Some of the guide is likely to be Arch-specific. I don&amp;#8217;t know how much,
+so please watch out if you&amp;#8217;re using another system. I&amp;#8217;m going to explain
+why things are done the way they are, so you can replicate them under
+other&amp;nbsp;circumstances.&lt;/p&gt;
+&lt;h3&gt;Why&amp;nbsp;flashcache?&lt;/h3&gt;
+&lt;p&gt;First, what do I want to achieve? I&amp;#8217;m setting up a system which has a
+large spinning disk (&lt;span class="caps"&gt;300GB&lt;/span&gt;) and a rather small &lt;span class="caps"&gt;SSD&lt;/span&gt; (&lt;span class="caps"&gt;16GB&lt;/span&gt;). Why such a
+weird combination? Lenovo allowed me to add a free &lt;span class="caps"&gt;16GB&lt;/span&gt; &lt;span class="caps"&gt;SSD&lt;/span&gt; drive to the
+laptop configuration - couldn&amp;#8217;t say no ;) The small disk is not useful
+for a filesystem on its own, but if all disk writes/reads were cached on
+it before writing them back to the platters, it should give my system a
+huge performance gain without a huge money loss. Flashcache can achieve
+exactly that. It was written by people working for Facebook to speed up
+their databases, but it works just as well for many other usage&amp;nbsp;scenarios.&lt;/p&gt;
+&lt;p&gt;Why not other modules like bcache or something else dm-based? Because
+flashcache does not require kernel modifications. It&amp;#8217;s just a module and
+a set of utilities. You get a new kernel and they &amp;#8220;just work&amp;#8221; again - no
+source patching required. I&amp;#8217;m excited about the efforts for making
+&lt;a href="http://bcache.evilpiepirate.org/"&gt;bcache&lt;/a&gt; part of the kernel and for
+the new &lt;a href="http://www.mail-archive.com/stable@vger.kernel.org/msg33526.html"&gt;dm cache target&lt;/a&gt;
+coming in 3.9, but for now flashcache is what&amp;#8217;s available in the easiest&amp;nbsp;way.&lt;/p&gt;
+&lt;p&gt;I&amp;#8217;m going to set up two &lt;span class="caps"&gt;SSD&lt;/span&gt; partitions because I want to cache two real
+partitions. There has to be a persistent 1:1 mapping between the cache
+and real storage for flashcache to work. One of the partitions is home
+(/home), the other is the root&amp;nbsp;(/).&lt;/p&gt;
+&lt;h3&gt;Preparation&lt;/h3&gt;
+&lt;p&gt;Take backups, make sure you have a bootable installer of your system,
+make sure you really want to try this. Any mistake can cost you all the
+contents of your harddrive or break your grub configuration, so that
+you&amp;#8217;ll need an alternative method of accessing your system. Also some of
+your &amp;#8220;data has been written&amp;#8221; guarantees are going to disappear. You&amp;#8217;ve
+been&amp;nbsp;warned.&lt;/p&gt;
+&lt;h3&gt;Building the modules and&amp;nbsp;tools&lt;/h3&gt;
+&lt;p&gt;First we need the source. Make sure your git is installed and clone the
+flashcache repository:&amp;nbsp;https://github.com/facebook/flashcache&lt;/p&gt;
+&lt;p&gt;Then build it, specifying the path where the kernel source is located -
+in case you&amp;#8217;re in the middle of a version upgrade, this is the version
+you&amp;#8217;re compiling for, not the one you&amp;#8217;re using&amp;nbsp;now:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;make KERNEL_TREE=/usr/src/linux-3.7.10-1-ARCH KERNEL_SOURCE_VERSION=3.7.10-1-ARCH
+sudo make KERNEL_TREE=/usr/src/linux-3.7.10-1-ARCH KERNEL_SOURCE_VERSION=3.7.10-1-ARCH install
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;p&gt;There should be no surprises at all until now. The above should install
+a couple of things - the module and 4&amp;nbsp;utilities:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;/usr/lib/modules/&amp;lt;version&amp;gt;/extra/flashcache/flashcache.ko
+/sbin/flashcache_load
+/sbin/flashcache_create
+/sbin/flashcache_destroy
+/sbin/flashcache_setioctl
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;p&gt;The module is the most interesting bit at the moment, but to load the
+cache properly at boot time, we&amp;#8217;ll need to put those binaries on the&amp;nbsp;ramdisk.&lt;/p&gt;
+&lt;h3&gt;Configuring&amp;nbsp;ramdisk&lt;/h3&gt;
+&lt;p&gt;Arch system creates the ramdisk using &lt;strong&gt;mkinitcpio&lt;/strong&gt; (which is a
+successor to initramfs (which is a successor to initrd)) - you can read
+some more about it at &lt;a href="https://wiki.ubuntu.com/Initramfs" title="Initramfs"&gt;Ubuntu wiki&lt;/a&gt; for example. The
+way this works is via hooks configured in &lt;strong&gt;/etc/mkinitcpio.conf&lt;/strong&gt;. When
+the new kernel gets created, all hooks from that file are run in the
+defined order to build up the contents of what ends up in
+/boot/initramfs-linux.img (unless you changed the&amp;nbsp;default).&lt;/p&gt;
+&lt;p&gt;The runtime scripts live in /usr/lib/initcpio/hooks while the ramdisk
+building elements live in &lt;strong&gt;/usr/lib/initcpio/install&lt;/strong&gt;. Now the
+interesting part starts: first let&amp;#8217;s place all needed bits into the
+ramdisk, by creating install hook
+&lt;strong&gt;/usr/lib/initcpio/install/flashcache&lt;/strong&gt;&amp;nbsp;:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;# vim: set ft=sh:
+
+build ()
+{
+    add_module &amp;quot;dm-mod&amp;quot;
+    add_module &amp;quot;flashcache&amp;quot;
+
+    add_dir &amp;quot;/dev/mapper&amp;quot;
+    add_binary &amp;quot;/usr/sbin/dmsetup&amp;quot;
+    add_binary &amp;quot;/sbin/flashcache_create&amp;quot;
+    add_binary &amp;quot;/sbin/flashcache_load&amp;quot;
+    add_binary &amp;quot;/sbin/flashcache_destroy&amp;quot;
+    add_file &amp;quot;/lib/udev/rules.d/10-dm.rules&amp;quot;
+    add_file &amp;quot;/lib/udev/rules.d/13-dm-disk.rules&amp;quot;
+    add_file &amp;quot;/lib/udev/rules.d/95-dm-notify.rules&amp;quot;
+    add_file &amp;quot;/lib/udev/rules.d/11-dm-lvm.rules&amp;quot;
+
+    add_runscript
+}
+
+help ()
+{
+cat&amp;lt;&amp;lt;HELPEOF
+  This hook loads the necessary modules for a flash drive as a cache device for your root device.
+HELPEOF
+}
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;p&gt;This will add the required modules (&lt;strong&gt;dm-mod&lt;/strong&gt; and &lt;strong&gt;flashcache&lt;/strong&gt;), make
+sure mapper directory is ready, install the tools and add some useful
+udev disk discovery rules. Same rules are included in the lvm2 hook (I
+assume you&amp;#8217;re using it anyway), so there is an overlap, but this will
+not cause any&amp;nbsp;conflicts.&lt;/p&gt;
+&lt;p&gt;The last line of the build function makes sure that the script with
+runtime hooks will be included too. That&amp;#8217;s the file which needs to
+ensure everything is loaded at boot time. It should contain function
+run_hook which runs after the modules are loaded, but before the
+filesystems are mounted, which is a perfect time for additional device
+setup. It looks like this and goes into
+&lt;strong&gt;/usr/lib/initcpio/hooks/flashcache&lt;/strong&gt;:&lt;/p&gt;
+&lt;table class="highlighttable"&gt;&lt;tr&gt;&lt;td class="linenos"&gt;&lt;div class="linenodiv"&gt;&lt;pre&gt; 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20&lt;/pre&gt;&lt;/div&gt;&lt;/td&gt;&lt;td class="code"&gt;&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span class="c"&gt;#!/usr/bin/ash&lt;/span&gt;
+
+run_hook &lt;span class="o"&gt;()&lt;/span&gt;
+&lt;span class="o"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="o"&gt;[&lt;/span&gt; ! -e &lt;span class="s2"&gt;&amp;quot;/dev/mapper/control&amp;quot;&lt;/span&gt; &lt;span class="o"&gt;]&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="k"&gt;then&lt;/span&gt;
+        /bin/mknod &lt;span class="s2"&gt;&amp;quot;/dev/mapper/control&amp;quot;&lt;/span&gt; c &lt;span class="k"&gt;$(&lt;/span&gt;cat /sys/class/misc/device-mapper/dev &lt;span class="p"&gt;|&lt;/span&gt; sed &lt;span class="s1"&gt;&amp;#39;s|:| |&amp;#39;&lt;/span&gt;&lt;span class="k"&gt;)&lt;/span&gt;
+    &lt;span class="k"&gt;fi&lt;/span&gt;
+
+    &lt;span class="o"&gt;[&lt;/span&gt; &lt;span class="s2"&gt;&amp;quot;&lt;/span&gt;&lt;span class="si"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;quiet&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;&amp;quot;&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s2"&gt;&amp;quot;y&amp;quot;&lt;/span&gt; &lt;span class="o"&gt;]&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; &lt;span class="nv"&gt;LVMQUIET&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s2"&gt;&amp;quot;&amp;gt;/dev/null&amp;quot;&lt;/span&gt;
+
+    msg &lt;span class="s2"&gt;&amp;quot;Activating cache volumes...&amp;quot;&lt;/span&gt;
+    &lt;span class="nv"&gt;oIFS&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s2"&gt;&amp;quot;&lt;/span&gt;&lt;span class="si"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;IFS&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;&amp;quot;&lt;/span&gt;
+    &lt;span class="nv"&gt;IFS&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s2"&gt;&amp;quot;,&amp;quot;&lt;/span&gt;
+    &lt;span class="k"&gt;for&lt;/span&gt; disk in &lt;span class="si"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;flashcache_volumes&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt; &lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+        &lt;span class="nb"&gt;eval&lt;/span&gt; /usr/sbin/flashcache_load &lt;span class="s2"&gt;&amp;quot;&lt;/span&gt;&lt;span class="si"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;disk&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;&amp;quot;&lt;/span&gt; &lt;span class="nv"&gt;$LVMQUIET&lt;/span&gt;
+    &lt;span class="k"&gt;done&lt;/span&gt;
+    &lt;span class="nv"&gt;IFS&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s2"&gt;&amp;quot;&lt;/span&gt;&lt;span class="si"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;oIFS&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;&amp;quot;&lt;/span&gt;
+&lt;span class="o"&gt;}&lt;/span&gt;
+
+&lt;span class="c"&gt;# vim:set ft=sh:&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+
+&lt;p&gt;Why the crazy splitting and where does flashcache_volumes come from?
+It&amp;#8217;s done so that the values are not hardcoded and adding a volume
+doesn&amp;#8217;t require rebuilding initramfs. Each variable set as kernel boot
+parameter is visible in the hook script, so adding a
+&lt;strong&gt;flashcache_volumes=/dev/sdb1,/dev/sdb2&lt;/strong&gt; will activate both of those
+volumes. I just add that to the GRUB_CMDLINE_LINUX_DEFAULT variable
+in&amp;nbsp;/etc/default/grub.&lt;/p&gt;
+&lt;p&gt;The commands for loading sdb1, sdb2 are in my case the partitions on the
+&lt;span class="caps"&gt;SSD&lt;/span&gt; drive - but you may need to change those to match your&amp;nbsp;environment.&lt;/p&gt;
+&lt;p&gt;Additionally if you&amp;#8217;re attempting to have your root filesystem handled
+by flashcache, you&amp;#8217;ll need two more parameters. One is of course
+&lt;strong&gt;root=/dev/mapper/cached_system&lt;/strong&gt; and the second is
+&lt;strong&gt;lvmwait=/dev/maper/cached_system&lt;/strong&gt; to make sure the device is mounted
+before the system starts&amp;nbsp;booting.&lt;/p&gt;
+&lt;p&gt;At this point regenerating the initramfs (&lt;strong&gt;sudo mkinitcpio -p linux&lt;/strong&gt;)
+should work and print out something about included flashcache. For&amp;nbsp;example:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;==&amp;gt; Building image from preset: &amp;#39;default&amp;#39;
+  -&amp;gt; -k /boot/vmlinuz-linux -c /etc/mkinitcpio.conf -g /boot/initramfs-linux.img
+==&amp;gt; Starting build: 3.7.10-1-ARCH
+  -&amp;gt; Running build hook: [base]
+  -&amp;gt; Running build hook: [udev]
+  -&amp;gt; Running build hook: [autodetect]
+  -&amp;gt; Running build hook: [modconf]
+  -&amp;gt; Running build hook: [block]
+  -&amp;gt; Running build hook: [lvm2]
+  -&amp;gt; Running build hook: [flashcache]
+  -&amp;gt; Running build hook: [filesystems]
+  -&amp;gt; Running build hook: [keyboard]
+  -&amp;gt; Running build hook: [fsck]
+==&amp;gt; Generating module dependencies
+==&amp;gt; Creating gzip initcpio image: /boot/initramfs-linux.img
+==&amp;gt; Image generation successful
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;h3&gt;Finale - fs preparation and&amp;nbsp;reboot&lt;/h3&gt;
+&lt;p&gt;To actually create the initial caching filesystem you&amp;#8217;ll have to prepare
+the &lt;span class="caps"&gt;SSD&lt;/span&gt; drive. Assuming it&amp;#8217;s already split into partitions - each one
+for buffering data from a corresponding real partition, you have to run
+the &lt;strong&gt;flashcache_create&lt;/strong&gt; app. The details of how to run it and
+available modes are described in the
+&lt;a href="https://github.com/facebook/flashcache/blob/master/doc/flashcache-sa-guide.txt"&gt;flashcache-sa-guide.txt&lt;/a&gt;
+file in the repository, but the simplest example is (in my case to
+create the root partition&amp;nbsp;cache:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;flashcache_create -p back cached_system /dev/sdb1 /dev/sda2
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;p&gt;which creates a devmapper device called cached_system with fast cache
+on /dev/sdb1 and backing storage on&amp;nbsp;/dev/sda2.&lt;/p&gt;
+&lt;p&gt;Now adjust your /etc/fstab to point at the caching devices where
+necessary, install grub to include the new parameters and reboot. If
+things went well you&amp;#8217;ll be running from the cache instead of directly
+from the spinning&amp;nbsp;disk.&lt;/p&gt;
+&lt;h3&gt;Was it worth the&amp;nbsp;work?&lt;/h3&gt;
+&lt;p&gt;Learning about initramfs and configuring it by hand - of course - it was
+lots of fun and I got a ramdisk failing to boot the system only 3 times
+in the&amp;nbsp;process&amp;#8230;&lt;/p&gt;
+&lt;p&gt;Configuring flashcache - &lt;span class="caps"&gt;OH&lt;/span&gt; &lt;span class="caps"&gt;YES&lt;/span&gt;! It&amp;#8217;s a night and day difference. You
+can check the stats of your cache device by running dmsetup status
+devicename. In my case after a couple of days of browsing, watching
+movies, hacking on python and haskell code, I get 92% cache hits on read
+and 58% on write on the root filesystem. On home it&amp;#8217;s 97% and 91%
+respectively. Each partition is &lt;span class="caps"&gt;50GB&lt;/span&gt; &lt;span class="caps"&gt;HDD&lt;/span&gt; with &lt;span class="caps"&gt;8GB&lt;/span&gt; &lt;span class="caps"&gt;SDD&lt;/span&gt; cache. Since the
+cache persists across reboots, startup times have also dropped from \~5
+minutes to around a minute in&amp;nbsp;total.&lt;/p&gt;
+&lt;p&gt;I worked on &lt;span class="caps"&gt;SSD&lt;/span&gt;-only machines before and honestly can&amp;#8217;t tell the
+difference between them and one with flashcache during standard usage.
+The only time when you&amp;#8217;re likely to notice a delay is when loading a
+new, uncached program and the disk has to spin up for&amp;nbsp;reading.&lt;/p&gt;
+&lt;p&gt;Good luck with your&amp;nbsp;setup.&lt;/p&gt;</description><dc:creator xmlns:dc="http://purl.org/dc/elements/1.1/">viraptor</dc:creator><pubDate>Thu, 14 Mar 2013 12:20:00 +0000</pubDate><guid>tag:blog.viraptor.info,2013-03-14:post/45310603661/setting-up-flashcache-the-hard-way-and-some-talk</guid><category>flashcache</category><category>ssd</category><category>kernel</category><category>initcpio</category><category>linux</category><category>arch</category></item><item><title>Peek and poke in the age of Linux</title><link>http://blog.viraptor.info/post/44424140237/peek-and-poke-in-the-age-of-linux</link><description>&lt;p&gt;Some time ago I ran into a production issue where the &lt;strong&gt;init&lt;/strong&gt; process
+(&lt;strong&gt;upstart&lt;/strong&gt;) stopped behaving properly. Specifically, instead of
+spawning new processes, it deadlocked in a transitional state. To be
+precise, the init process itself was responsive, but the critical
+services were stuck in one of the pre- or post- states, never actually
+restarting. What&amp;#8217;s worse, upstart doesn&amp;#8217;t allow forcing a state
+transition and trying to manually create and send &lt;strong&gt;DBus&lt;/strong&gt; events didn&amp;#8217;t
+help either. That meant the sane options we were left with&amp;nbsp;were:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;restart the host (not desirable at all in that&amp;nbsp;scenario)&lt;/li&gt;
+&lt;li&gt;start the process manually and hope auto-respawn will not be&amp;nbsp;needed.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;Of course there are also some insane options. Why not cheat like in the
+old times and just &lt;strong&gt;&lt;span class="caps"&gt;PEEK&lt;/span&gt;&lt;/strong&gt; and &lt;strong&gt;&lt;span class="caps"&gt;POKE&lt;/span&gt;&lt;/strong&gt; the process in the right
+places? The solution used at the time involved a very ugly script
+driving gdb which probably summoned satan in some edge cases. But edge
+cases were not hit and majority of hosts recovered without issues. (if
+you overwrite memory of your init process, you should expect at least a
+small percent of segfaults) After some time however I wanted to recreate
+the experiment in a cleaner way and see what interfaces are available if
+I had a legitimate use for doing something similar&amp;nbsp;again.&lt;/p&gt;
+&lt;p&gt;The goal is the same - given an upstart job name, change its &lt;strong&gt;goal&lt;/strong&gt;
+and &lt;strong&gt;status&lt;/strong&gt; fields to arbitrary values, without killing the &lt;strong&gt;init&lt;/strong&gt;
+process. First some context&amp;nbsp;however:&lt;/p&gt;
+&lt;h3&gt;Why is peek/poke harder these&amp;nbsp;days?&lt;/h3&gt;
+&lt;p&gt;In good old times when software size was measured in kilobytes and each
+byte was quite expensive dynamic allocation was very rare. Whatever
+could be static, was static. Whatever couldn&amp;#8217;t be, was most likely
+pooled in a specific region and there was a preset number of &amp;#8220;things&amp;#8221;
+the program could handle. That means your lives counter or some other
+important value was most likely always at the exact same address every
+time. That&amp;#8217;s not the case anymore unfortunately. Almost everything needs
+to handle an arbitrary number of &amp;#8220;things&amp;#8221; these days and that means
+dynamic&amp;nbsp;allocation.&lt;/p&gt;
+&lt;p&gt;It&amp;#8217;s also trivial to allocate new memory regions and &lt;span class="caps"&gt;OS&lt;/span&gt; takes care of
+things like making sure the memory looks like a one continuous space to
+your app, while it reality it can be all over the place. The practical
+implication is that anything we&amp;#8217;ll need to search for in the upstart
+process will be malloc&amp;#8217;d somewhere in the &lt;strong&gt;heap&lt;/strong&gt; area. We also need to
+know where the heap happens to be at the specific&amp;nbsp;time.&lt;/p&gt;
+&lt;h3&gt;Ways of direct access to a&amp;nbsp;process.&lt;/h3&gt;
+&lt;p&gt;On Linux there are a couple of ways to access memory of a foreign
+process. The easiest two are reading directly from /proc/(pid)/mem and
+using the &lt;strong&gt;ptrace&lt;/strong&gt; library. The ptrace request ids are actually called
+&lt;strong&gt;PTRACE_PEEKDATA&lt;/strong&gt; and &lt;strong&gt;PTRACE_POKEDATA&lt;/strong&gt; which should make their
+purpose quite clear. There&amp;#8217;s a lot of information about them in man
+pages if you want more details, but let&amp;#8217;s move on to some real&amp;nbsp;action.&lt;/p&gt;
+&lt;p&gt;Where to read from is another interesting question. Apart from dynamic
+allocation we&amp;#8217;ve got virtual memory these days and additional
+memory-shifting concepts like &lt;strong&gt;&lt;span class="caps"&gt;ASLR&lt;/span&gt;&lt;/strong&gt;. The up-to-date, valid
+information about where to look for data will exist under
+/proc/(pid)/maps for each running application. For the init process (&lt;span class="caps"&gt;PID&lt;/span&gt;
+1), it looks something like&amp;nbsp;this:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;......
+7fae2b2b7000-7fae2b2b9000 rw-p 00023000 fd:01 2860       /lib/x86_64-linux-gnu/ld-2.15.so
+7fae2b2b9000-7fae2b2df000 r-xp 00000000 fd:01 4259       /sbin/init (deleted)
+7fae2b4de000-7fae2b4e0000 r--p 00025000 fd:01 4259       /sbin/init (deleted)
+7fae2b4e0000-7fae2b4e1000 rw-p 00027000 fd:01 4259       /sbin/init (deleted)
+7fae2cf09000-7fae2cfd0000 rw-p 00000000 00:00 0          [heap]
+7fffc146b000-7fffc148c000 rw-p 00000000 00:00 0          [stack]
+7fffc1599000-7fffc159a000 r-xp 00000000 00:00 0          [vdso]
+ffffffffff600000-ffffffffff601000 r-xp 00000000 00:00 0  [vsyscall]
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;p&gt;As previously noted, all of the interesting / long-lived data will be
+found in the heap which is annotated with a fake path &amp;#8220;&lt;strong&gt;[heap]&lt;/strong&gt;&amp;#8220;. All
+of the ranges listed in the maps file are available. Others will give an
+error on access. Process memory acts like a stricter version of a sparse
+file in this&amp;nbsp;case.&lt;/p&gt;
+&lt;h3&gt;Nice ways of direct&amp;nbsp;access&lt;/h3&gt;
+&lt;p&gt;Both ptrace and memory-file interfaces are quite low-level, so instead
+of writing lots of C code, I&amp;#8217;m going to use some Python instead.
+Fortunately there&amp;#8217;s an existing &lt;a href="https://pypi.python.org/pypi/python-ptrace"&gt;ptrace wrapper on pypi&lt;/a&gt; and even though it
+looks abandoned, it still works very well. The interface allows easy
+&amp;#8220;stop and attach&amp;#8221; operation as well as exposes some interesting
+functions for address range reading and writing. Allow me to do some
+blog-literate programming here. The ptrace interface allows for easy
+attaching to a chosen &lt;span class="caps"&gt;PID&lt;/span&gt; (1 in this&amp;nbsp;case):&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;def get_init_process():
+    d = ptrace.debugger.PtraceDebugger()
+    proc = d.addProcess(1, False)
+    return proc
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;p&gt;Now down to the details&amp;#8230; After a quick glance at
+&lt;a href="http://bazaar.launchpad.net/~ubuntu-branches/ubuntu/precise/upstart/precise/view/head:/init/job.h" title="init/job.h"&gt;init/job.h&lt;/a&gt;
+from upstart source code, it looks like we&amp;#8217;re interested in two values
+from struct Job - goal and state. Both have a range of values described
+at the top of the file. Counting from the beginning of the struct,
+they&amp;#8217;re at offset 5*(native pointer length), because
+&lt;a href="http://libnih.sourcearchive.com/documentation/1.0.1/structnih__list.html" title="libnih documentation"&gt;NihList&lt;/a&gt;
+consists of two pointers&amp;nbsp;only.&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;PTR_SIZE=ptrace.cpu_info.CPU_WORD_SIZE
+JOB_CLASS_NAME_OFFSET = PTR_SIZE*2
+JOB_CLASS_PATH_OFFSET = PTR_SIZE*3
+JOB_NAME_OFFSET = PTR_SIZE*2
+JOB_JOB_CLASS_OFFSET = PTR_SIZE*3
+JOB_PATH_OFFSET = PTR_SIZE*4
+JOB_GOAL_OFFSET = PTR_SIZE*5
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;p&gt;But struct &lt;strong&gt;Job&lt;/strong&gt; is not something we can find easily. Let&amp;#8217;s say the
+upstart job to fix is called &amp;#8220;&lt;em&gt;rsyslog&lt;/em&gt;&amp;#8220;. This string is in the heap,
+but not pointed to from the Job structure. That part initially consisted
+of some guesswork and upstream code browsing which I&amp;#8217;m not going to
+reproduce here, but the result is that the bytes &amp;#8220;&lt;em&gt;rsyslog&lt;/em&gt;&amp;#8221; (or
+&amp;#8220;&lt;em&gt;rsyslog\0&lt;/em&gt;&amp;#8221; to be precise) exists in structure &lt;strong&gt;JobClass&lt;/strong&gt; in
+&lt;a href="http://bazaar.launchpad.net/~ubuntu-branches/ubuntu/precise/upstart/precise/view/head:/init/job_class.h" title="init/job_class.h"&gt;init/job_class.h&lt;/a&gt;.
+Actually&amp;#8230; there and in 18 other places. That means on the current
+system I can find 19 places which contain that name terminated by a zero
+byte and the next steps are going to be figuring out how to figure out
+which of those occurrences can be traced back to the job&amp;nbsp;itself.&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;def get_heap(proc):
+    return [m for m in proc.readMappings() if m.pathname == &amp;#39;[heap]&amp;#39;][0]
+
+def find_refs_to(mem, bytestr)
+    return [addr for addr in heap.search(bytestr)]
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;p&gt;With such a low number of hits we can just check each of them and see
+how viable each one&amp;nbsp;is.&lt;/p&gt;
+&lt;h3&gt;Tracking&amp;nbsp;references&lt;/h3&gt;
+&lt;p&gt;So how to find out if each of the guesses is correct? By checking if the
+surrounding values and pointers makes sense. In this case the JobClass
+has a &lt;strong&gt;path&lt;/strong&gt; field which according to comments is a string containing
+the DBus path for the job. As noted previously, those fields have a
+known offset from the start of the structure. Let&amp;#8217;s write something
+generic then that will browse through given addresses and check if the
+memory referencing them looks like it could be a known&amp;nbsp;object:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;def flatten(stream):
+    result = []
+    for collection in stream:
+        result.extend(collection)
+    return result
+
+def places_referring_to(mem, search_value):
+    needle = ptrace.ctypes_tools.word2bytes(search_value)
+    return find_refs_to(mem, needle)
+
+def find_object_references(proc, heap, values, offset, verifier):
+    refs = flatten(places_referring_to(heap, value) for value in values)
+    return [ref-offset for ref in refs if verifier(proc, ref-offset)]
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;p&gt;Now some functions that can actually judge whether some location looks
+like a Job or a JobClass by extracting expected&amp;nbsp;strings:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;def deref_string(proc, addr):
+    s_addr = proc.readWord(addr)
+    try:
+        return proc.readCString(s_addr, 100)[0]
+    except ptrace.debugger.process_error.ProcessError:
+        return None
+
+def looks_like_job_class(proc, addr):
+    s = deref_string(proc, addr+JOB_CLASS_PATH_OFFSET)
+    return s is not None and s.startswith(&amp;#39;/com/ubuntu/Upstart/jobs/&amp;#39;)
+
+def looks_like_job(proc, addr):
+    s = deref_string(proc, addr+JOB_PATH_OFFSET)
+    return s is not None and s.startswith(&amp;#39;/com/ubuntu/Upstart/jobs/&amp;#39;)
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;p&gt;And that&amp;#8217;s it. There could be a lot more sanity checking going on, but
+after a quick check it appears to be unnecessary. A quick run results in
+only one pointer which actually does show a valid Job&amp;nbsp;structure.&lt;/p&gt;
+&lt;p&gt;The reference chain we&amp;#8217;re looking for is: string (name of the
+process) -&gt; that is used in a JobClass -&gt; that is used in a Job. To
+wrap it all up into an actual&amp;nbsp;script:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;proc = get_init_process()
+heap = get_heap(proc)
+process_strings = find_refs_to(heap, process_to_fix)
+job_classes = find_object_references(proc, heap, process_strings,
+    JOB_CLASS_NAME_OFFSET, looks_like_job_class)
+jobs = find_object_references(proc, heap, job_classes,
+    JOB_JOB_CLASS_OFFSET, looks_like_job)
+
+for job in jobs:
+    print &amp;quot;job found at 0x%016x&amp;quot; % job
+    goal, state = proc.readStruct(job+JOB_GOAL_OFFSET,
+        ctypes.c_int32*2)[:]
+    print &amp;quot;goal&amp;quot;, job_goals[goal]
+    print &amp;quot;state&amp;quot;, job_states[state]
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;h3&gt;Does it all&amp;nbsp;work?&lt;/h3&gt;
+&lt;p&gt;Yes, of course it does! And pretty reliably&amp;nbsp;actually:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;sudo ./search_init.py rsyslog
+job found at 0x00007fae2cf95ca0
+goal JOB_START
+state JOB_RUNNING
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;p&gt;After finding the right address it&amp;#8217;s only a matter of
+&lt;strong&gt;proc.writeBytes()&lt;/strong&gt; to force the change of the goal and&amp;nbsp;state.&lt;/p&gt;
+&lt;p&gt;Unfortunately there&amp;#8217;s nothing stopping the system from being in a state
+where this change really shouldn&amp;#8217;t happen. For example right before the
+value is read, or while it&amp;#8217;s being copied and some code path still holds
+the old reference, or&amp;#8230; Basically changing memory which you don&amp;#8217;t have
+complete control over is not safe. Ever. Around 1% of machines had
+problems with init going crazy afterwards, but those could be just
+rebooted then. But as a hack that allows you to fix a critical issue,
+it&amp;#8217;s worth remembering that it&amp;#8217;s not rocket&amp;nbsp;science.&lt;/p&gt;
+&lt;p&gt;And finally: thanks to &lt;a href="https://bitbucket.org/haypo" title="Victor Stinner's bitbucket repos"&gt;Victor Stinner&lt;/a&gt;
+for writing some really useful Python&amp;nbsp;tools.&lt;/p&gt;</description><dc:creator xmlns:dc="http://purl.org/dc/elements/1.1/">viraptor</dc:creator><pubDate>Sun, 03 Mar 2013 14:18:00 +0000</pubDate><guid>tag:blog.viraptor.info,2013-03-03:post/44424140237/peek-and-poke-in-the-age-of-linux</guid><category>Python</category><category>coding</category><category>hacks</category><category>peek</category><category>poke</category><category>linux</category><category>ptrace</category></item><item><title>ABC of cracking ABC and unknown protocols</title><link>http://blog.viraptor.info/post/43051577987/abc-of-cracking-abc-and-unknown-protocols</link><description>&lt;p&gt;I started playing some flash-based &lt;span class="caps"&gt;MMORPG&lt;/span&gt; for fun lately. The limited
+options available to the characters in RPGs are not as entertaining as
+programming, so this didn&amp;#8217;t last long; but it definitely gave me an
+idea&amp;#8230; Can I get the event stream and decode it without knowing
+anything about the game&amp;#8217;s design and of course without any source
+available? Now that&amp;#8217;s an interesting&amp;nbsp;quest!&lt;/p&gt;
+&lt;p&gt;Warning: if you see anything silly about &lt;span class="caps"&gt;ABC&lt;/span&gt; or Flash, that might be
+because I learned everything I know about it during this project. Any
+corrections&amp;nbsp;welcome.&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Overview of&amp;nbsp;communication&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;Before going into the details of communication I had to figure out
+what&amp;#8217;s happening in general - what connections are started, how much
+data is sent, what does the encapsulation look like, etc. That task is
+pretty trivial with help of Wireshark. I set it to capture everything,
+connected, entered the game for a moment and left. So what could I learn
+from this short&amp;nbsp;record?&lt;/p&gt;
+&lt;p&gt;There were three communication&amp;nbsp;channels:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;An unencrypted &lt;span class="caps"&gt;HTTP&lt;/span&gt; &lt;span class="caps"&gt;GET&lt;/span&gt; request which returned one word (number) -
+    probably something related to a version check or cache&amp;nbsp;invalidation&lt;/li&gt;
+&lt;li&gt;An encrypted &lt;span class="caps"&gt;HTTP&lt;/span&gt; request which contained (thanks to &lt;span class="caps"&gt;SSL&lt;/span&gt; &lt;span class="caps"&gt;MITM&lt;/span&gt; and
+    own &lt;span class="caps"&gt;CA&lt;/span&gt; injection) the first login and some details about the
+    available game&amp;nbsp;characters&lt;/li&gt;
+&lt;li&gt;Then some time later, a single &lt;span class="caps"&gt;TCP&lt;/span&gt; connection constantly streaming
+    loads of small portions of&amp;nbsp;data&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;Everything looks pretty obvious, but&amp;#8230; the long &lt;span class="caps"&gt;TCP&lt;/span&gt; connection seems to
+contain just garbage. That usually means that the data is either
+compressed or encrypted. The second one being more likely since that
+game would aim for minimum delays and small update packets. After
+checking the usual options - can &amp;#8216;file&amp;#8217; identify the stream, does it
+start with any standard header, can standard tools unpack it, does it
+contain any readable strings - I found that the only answer was &amp;#8220;no&amp;#8221;.
+Encryption it is&amp;nbsp;then&amp;#8230;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Going&amp;nbsp;deeper&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;Finding out more details about encryption was pretty easy. I
+disassembled the code in .swf and noticed that even though the main code
+was obfuscated, the libraries weren&amp;#8217;t. This only required a quick grep
+for &amp;#8220;cipher&amp;#8221; and I knew the library was from crypto.hurlant.com. After a
+moment it was obvious which function to look for (Crypto.getCipher).
+This was very useful, because at that point I knew both what functions
+were used and what arguments they take. Calls to that function were
+present in a couple of places as expected and what was left was to
+figure out where does the key come from. That part was a bit&amp;nbsp;harder.&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Flash decompilers are very poor&amp;nbsp;quality&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;I tried to find some decompiler for Flash to find the source of the key
+generation. Browsing through the &lt;span class="caps"&gt;ABC&lt;/span&gt; was a bit too hard (even though
+&lt;a href="http://www.adobe.com/content/dam/Adobe/en/devnet/actionscript/articles/avm2overview.pdf" title="AVM 2 Overview"&gt;the code&lt;/a&gt;
+itself is quite simple) and I could not know how far the answer was.
+Maybe the key was generated in a trivial function, maybe it was split
+over many&amp;nbsp;stages&amp;#8230;&lt;/p&gt;
+&lt;p&gt;I thought: why not decompile everything to &lt;span class="caps"&gt;AS&lt;/span&gt; source code, surely it
+can&amp;#8217;t be that tricky. Unfortunately it was - I got 3 different results
+from the software I could get my hands on: Complete crash, crash only on
+some modules, refusing to decompile. To be honest, I did not expect
+&lt;a href="http://www.hex-rays.com/" title="Hex Rays homepage"&gt;hexrays&lt;/a&gt; quality but
+something that does the minimum would be great. The partial results I
+got were completely silly and quite surprising. It seems that the easily
+available flash decompilers don&amp;#8217;t even try to recreate what the code
+does - they just switch instructions into &lt;span class="caps"&gt;AS&lt;/span&gt; statements. If your &lt;span class="caps"&gt;ABC&lt;/span&gt;
+says &amp;#8220;inclocal_i &amp;#8230;; declocal_i &amp;#8230;&amp;#8221; that&amp;#8217;s exactly what you&amp;#8217;ll see
+done on a temporary variable&amp;#8230; which turns out to be unused&amp;nbsp;afterwards.&lt;/p&gt;
+&lt;p&gt;At this point I&amp;#8217;ve done what any other insane person would do - started
+writing own decompiler. It&amp;#8217;s not that hard really. Actually you can grab
+the last compiler you wrote (everyone wrote one, right?), and reuse
+large parts of it. Operations gets split into blocks linked to other
+blocks, you name every stack position and local variable with unique
+name, convert the code into &lt;span class="caps"&gt;SSA&lt;/span&gt; form, remove dead blocks, do peep-hole
+optimisations to strip silly obfuscation code, detect which loops can be
+converted into while-s/for-s and spit out the code&amp;#8230; At stage 3 or 4, I
+noticed that the whole idea is silly and although the project was
+working nicely (probably at this point gave better results than some
+commercial solutions I tried before, even if not all opcodes were
+implemented) this is just wasting time. I had one simple task and this
+tool would take too long to complete even if it was limited to just &lt;span class="caps"&gt;ABC&lt;/span&gt;
+cleanup and propagating argument names into&amp;nbsp;variables.&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;A better&amp;nbsp;way&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;Since I didn&amp;#8217;t really care about where the password comes from, but only
+what it is, I decided to do something else&amp;#8230; print out the key itself.
+Apparently there&amp;#8217;s this thing called flash debug player and you can use
+it to see the output of all &amp;#8220;trace(&amp;#8230;)&amp;#8221; calls with it - awesome! Ah&amp;#8230;
+and you need a 32b windows system for it, otherwise it&amp;#8217;s not going to
+work - that was a bit painful, but virtualbox solved this problem quite&amp;nbsp;well.&lt;/p&gt;
+&lt;p&gt;What I needed to do was to inject a bit of custom own code into the
+existing .swf, run it under the debug version of flash and collect the
+result. Injecting the code seems pretty hard if you want to do it
+yourself. There are loads of projects which will disassemble the .swf
+file, but almost none which can reassemble it again. Fortunately
+&lt;a href="http://code.google.com/p/apparat/" title="Apparat project homepage"&gt;Apparat&lt;/a&gt;
+does this in a quite simple way - by providing an &lt;span class="caps"&gt;API&lt;/span&gt; written in Scala.
+It provides a complete, magical framework for modifying the code and the
+only thing you need to provide is a filter to choose where the
+modification should be applied and a new template to expand in that&amp;nbsp;place.&lt;/p&gt;
+&lt;p&gt;Locating the needed part was pretty easy. It looked something like&amp;nbsp;this:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;getlocal 1
+getlocal 2
+getlocal 3
+call_property getCipher, 3
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;p&gt;This means just &amp;#8220;load 3 local variables on the stack and call
+getCipher&amp;#8221;. Of course the parameters were known from the library&amp;nbsp;source:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;getCipher(name:String, key:ByteArray, pad:IPad=null):ICipher
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;p&gt;I was interested in the key and the cipher. The pad was not needed after
+all - because the cipher turned out to be &amp;#8220;rc4&amp;#8221;. The way it works
+(simplified) is similar to a combination of a known seed (the key), a
+pseudo-random number generator and the plaintext xor&amp;#8217;ed with the &lt;span class="caps"&gt;PRNG&lt;/span&gt;&amp;#8217;s
+output. Very simple design and there are lots of libraries available to
+verify the&amp;nbsp;result.&lt;/p&gt;
+&lt;p&gt;Because only two arguments were interesting, it meant inserting the call
+to &amp;#8220;trace&amp;#8221; somewhere before the call to the library can give me the
+needed data. The only thing to remember is that the stack needs to be
+returned to exactly the same state as before, otherwise the rest of the
+code would fail. None of the local variables can be overwritten either.
+This is a work for a spy: get the key, convert to string, print out, put
+everything back in its place. Here&amp;#8217;s the full filter for Apparat,
+printing out the second&amp;nbsp;parameter:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span class="k"&gt;private&lt;/span&gt; &lt;span class="nf"&gt;lazy&lt;/span&gt; &lt;span class="nx"&gt;val&lt;/span&gt; &lt;span class="n"&gt;traceCipherCall&lt;/span&gt;&lt;span class="o"&gt; =&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;GetLocal&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="err"&gt;~&lt;/span&gt; &lt;span class="nx"&gt;GetLocal&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="err"&gt;~&lt;/span&gt; &lt;span class="nx"&gt;GetLocal&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="err"&gt;~&lt;/span&gt; &lt;span class="nx"&gt;BytecodeChains.partial&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;case&lt;/span&gt; &lt;span class="nx"&gt;originalCall&lt;/span&gt; &lt;span class="p"&gt;@&lt;/span&gt; &lt;span class="nx"&gt;CallProperty&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="nx"&gt;name&lt;/span&gt; &lt;span class="o"&gt;==&lt;/span&gt; &lt;span class="n"&gt;getCipherQName&lt;/span&gt;&lt;span class="o"&gt; =&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;originalCall&lt;/span&gt;
+  &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="p"&gt;^^&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;case&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;GetLocal&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="err"&gt;~&lt;/span&gt; &lt;span class="nx"&gt;GetLocal&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="err"&gt;~&lt;/span&gt; &lt;span class="nx"&gt;GetLocal&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="err"&gt;~&lt;/span&gt; &lt;span class="nx"&gt;x&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="kt"&gt;List&lt;/span&gt;&lt;span class="err"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;AbstractOp&lt;/span&gt;&lt;span class="cp"&gt;]&lt;/span&gt;&lt;span class="x"&gt;(&lt;/span&gt;
+&lt;span class="x"&gt;      FindPropStrict(traceQName),&lt;/span&gt;
+&lt;span class="x"&gt;      GetLocal(2),&lt;/span&gt;
+&lt;span class="x"&gt;      ConvertString(),&lt;/span&gt;
+&lt;span class="x"&gt;      CallPropVoid(traceQName, 1),&lt;/span&gt;
+&lt;span class="x"&gt;      GetLocal(1),&lt;/span&gt;
+&lt;span class="x"&gt;      GetLocal(2),&lt;/span&gt;
+&lt;span class="x"&gt;      GetLocal(3),&lt;/span&gt;
+&lt;span class="x"&gt;      x)&lt;/span&gt;
+&lt;span class="x"&gt;    case _ =&amp;gt; error(&amp;quot;internal fail&amp;quot;)&lt;/span&gt;
+&lt;span class="x"&gt;  }&lt;/span&gt;
+&lt;span class="x"&gt;}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;p&gt;This is fairly simple - match 3 getlocal-s followed by a call to
+&amp;#8220;getCipher&amp;#8221;. This sequence is pretty specific, so it matched only in 2
+places - exactly where it was needed. Now I needed to get the output.
+One installation of windows + debug flash + tons of crap later, I
+discovered that&amp;#8230; the application detects whether it&amp;#8217;s running in a
+debugging environment and changes its configuration to use the test
+server&amp;nbsp;instead.&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Removing debugger&amp;nbsp;detection&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;Two google searches later I found that the most likely way of debugger
+detection is checking the &amp;#8220;isDebugger&amp;#8221; variable. Unfortunately the check
+wasn&amp;#8217;t done in a simple if/else way. The code pushed the &amp;#8220;isDebugger&amp;#8221;
+string to some other function which then saved the results of the number
+of checks. I really didn&amp;#8217;t want to get into the details of how that
+happens. The easiest alternative was to use some other flag which was
+guaranteed to be false. Luckily, &amp;#8220;avHardwareDisable&amp;#8221; turned out to be a
+good candidate. The modification was quickly applied&amp;#8230; and the app went
+into testing mode again. Something else was missing - the most trivial
+fix was not&amp;nbsp;enough.&lt;/p&gt;
+&lt;p&gt;The second simplest thing to try was to look for the string describing
+the testing server and browse the code around it for some condition
+checking. And it was there! Some function was doing what looked like a
+dns lookup (still not sure if that was the case) and comparing the
+result to a known value - apparently running in a debugger influenced
+the result somehow. Since adding the &amp;#8220;testing&amp;#8221; string depended on the
+result of this function, it was a good enough candidate for patching.
+Fortunately the following&amp;nbsp;sequence:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;  convert_string
+  equals
+  getlocal_2
+  if_true &amp;quot;L2&amp;quot;
+  not
+&amp;quot;L2:&amp;quot;
+  return_value
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;p&gt;is not that popular. What happens here is: two strings get compared
+first, then the result gets flipped if local_2 is not set, then the
+result is returned. It&amp;#8217;s basically returning the result of string
+comparison xor local_2 - probably it went through bytecode obfuscation.
+The good way to hardcode the result without messing up the stack was
+changing the beginning&amp;nbsp;to:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;poppush_false
+push_true
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;p&gt;And&amp;#8230; success! On the next try the application connected to a
+production server and printed out the key it used. Not only that, but
+the key was successfully used later on to read and write any of the
+events sent between the client and the server. But that&amp;#8217;s a topic for
+another post in the&amp;nbsp;future.&lt;/p&gt;
+&lt;p&gt;Lessons if you want to protect your&amp;nbsp;communication:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;obfuscate the object files after including the libraries, not
+    before - especially if the libraries are&amp;nbsp;open-source&lt;/li&gt;
+&lt;li&gt;do a random key exchange instead of hardcoding your&amp;nbsp;passphrase&lt;/li&gt;
+&lt;li&gt;add &lt;span class="caps"&gt;CA&lt;/span&gt; verification (is it possible in flash? not&amp;nbsp;sure)&lt;/li&gt;
+&lt;li&gt;disassemble your own binaries to find&amp;nbsp;issues&lt;/li&gt;
+&lt;li&gt;&amp;#8230; all of the above will be worked around and your app will be
+    hacked anyway, get used to the idea&amp;nbsp;:)&lt;/li&gt;
+&lt;/ul&gt;</description><dc:creator xmlns:dc="http://purl.org/dc/elements/1.1/">viraptor</dc:creator><pubDate>Thu, 14 Feb 2013 14:20:20 +0000</pubDate><guid>tag:blog.viraptor.info,2013-02-14:post/43051577987/abc-of-cracking-abc-and-unknown-protocols</guid><category>abc</category><category>actionscript</category><category>flash</category><category>encryption</category><category>coding</category></item></channel></rss>

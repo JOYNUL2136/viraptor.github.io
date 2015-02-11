@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+        <meta charset="utf-8" />
+        <title>Wild code - preseed</title>
+        <link rel="stylesheet" href="../theme/css/main.css" />
+        <link href="http://blog.viraptor.info/feeds/all.rss.xml" type="application/rss+xml" rel="alternate" title="Wild code RSS Feed" />
+
+        <!--[if IE]>
+            <script src="http://html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+        <![endif]-->
+</head>
+
+<body id="index" class="home">
+        <header id="banner" class="body">
+                <h1><a href="../">Wild code </a></h1>
+                <nav><ul>
+                    <li><a href="../category/misc.html">misc</a></li>
+                </ul></nav>
+        </header><!-- /#banner -->
+
+            <aside id="featured" class="body">
+                <article>
+                    <h1 class="entry-title"><a href="../post/60000186508/issues-with-preseeding-dbconfig">Issues with preseeding&nbsp;dbconfig</a></h1>
+<footer class="post-info">
+        <abbr class="published" title="2013-09-02T05:31:37+00:00">
+                Published: Mon 02 September 2013
+        </abbr>
+
+        <address class="vcard author">
+                By                         <a class="url fn" href="../author/viraptor.html">viraptor</a>
+        </address>
+<p>In <a href="../category/misc.html">misc</a>. </p>
+<p>tags: <a href="../tag/preseed.html">preseed</a> <a href="../tag/ubuntu.html">ubuntu</a> <a href="../tag/salt.html">salt</a> <a href="../tag/automation.html">automation</a> </p>
+</footer><!-- /.post-info --><p>There&#8217;s an interesting side effect to way Debian-like systems handle the
+database configuration for various packages. Instead of each package
+setting the connection parameters on their own, they reuse the
+abstraction provided by package &#8216;dbconfig-common&#8217;. This is all fine in
+theory, but unfortunately dbconfig doesn&#8217;t seem to behave very well with
+values pre-set before&nbsp;installation.</p>
+<p>It should check the debconf settings called
+&#8220;\&lt;package>/internal/skip-preseed&#8221; and ignore all the setup and leave
+the configuration up to other tools. (configuration management!) But
+that&#8217;s not what happens at the start. For example package &#8220;phpmyadmin&#8221; -
+it depends on &#8220;dbconfig-common&#8221; and I didn&#8217;t want to this way of
+configuration. But here&#8217;s the catch: setting
+&#8220;phpmyadmin/internal/skip-preseed&#8221; to &#8220;true&#8221; didn&#8217;t work. The package is
+installed with a randomly generated&nbsp;password.</p>
+<p>There&#8217;s a way to work around this by splitting the installation into
+steps though. First install &#8220;dbconfig-common&#8221;, then set the values, then
+install the package. The way it works in salt (for example)&nbsp;is:</p>
+<div class="highlight"><pre>dbconfig-common:
+  pkg.installed
+phpmyadmin:
+  pkg:
+    - installed
+    - require:
+      - debconf: phpmyadmin
+  debconf.set:
+    - require:
+      - pkg: dbconfig-common
+    - data:
+        &#39;phpmyadmin/internal/skip-preseed&#39;:
+          type: boolean
+          value: true
+</pre></div>
+
+
+<p>Then it all works again. Hopefully also for packages other than&nbsp;phpmyadmin.</p>                </article>
+<p class="paginator">
+    Page 1 / 1
+</p>
+            </aside><!-- /#featured -->
+        <section id="extras" class="body">
+                <div class="blogroll">
+                        <h2>blogroll</h2>
+                        <ul>
+                            <li><a href="http://getpelican.com/">Pelican</a></li>
+                            <li><a href="https://news.ycombinator.com/">Hacker News</a></li>
+                        </ul>
+                </div><!-- /.blogroll -->
+                <div class="social">
+                        <h2>social</h2>
+                        <ul>
+                            <li><a href="http://blog.viraptor.info/feeds/all.rss.xml" type="application/rss+xml" rel="alternate">rss feed</a></li>
+
+                            <li><a href="http://twitter.com/viraptor">Twitter</a></li>
+                            <li><a href="http://github.com/viraptor">Github</a></li>
+                        </ul>
+                </div><!-- /.social -->
+        </section><!-- /#extras -->
+
+        <footer id="contentinfo" class="body">
+                <address id="about" class="vcard body">
+                Proudly powered by <a href="http://getpelican.com/">Pelican</a>, which takes great advantage of <a href="http://python.org">Python</a>.
+                </address><!-- /#about -->
+
+                <p>The theme is by <a href="http://coding.smashingmagazine.com/2009/08/04/designing-a-html-5-layout-from-scratch/">Smashing Magazine</a>, thanks!</p>
+        </footer><!-- /#contentinfo -->
+
+    <script type="text/javascript">
+    var _gaq = _gaq || [];
+    _gaq.push(['_setAccount', 'UA-260586-9']);
+    _gaq.push(['_trackPageview']);
+    (function() {
+        var ga = document.createElement('script'); ga.type = 'text/javascript'; ga.async = true;
+        ga.src = ('https:' == document.location.protocol ? 'https://ssl' : 'http://www') + '.google-analytics.com/ga.js';
+        var s = document.getElementsByTagName('script')[0]; s.parentNode.insertBefore(ga, s);
+    })();
+    </script>
+</body>
+</html>

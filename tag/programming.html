@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+        <meta charset="utf-8" />
+        <title>Wild code - programming</title>
+        <link rel="stylesheet" href="../theme/css/main.css" />
+        <link href="http://blog.viraptor.info/feeds/all.rss.xml" type="application/rss+xml" rel="alternate" title="Wild code RSS Feed" />
+
+        <!--[if IE]>
+            <script src="http://html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+        <![endif]-->
+</head>
+
+<body id="index" class="home">
+        <header id="banner" class="body">
+                <h1><a href="../">Wild code </a></h1>
+                <nav><ul>
+                    <li><a href="../category/misc.html">misc</a></li>
+                </ul></nav>
+        </header><!-- /#banner -->
+
+            <aside id="featured" class="body">
+                <article>
+                    <h1 class="entry-title"><a href="../post/104373878281/reducing-a-network-problem-to-a-file-problem">Reducing a network problem to a file problem&nbsp;(fuzzing)</a></h1>
+<footer class="post-info">
+        <abbr class="published" title="2014-12-05T12:57:00+00:00">
+                Published: Fri 05 December 2014
+        </abbr>
+
+        <address class="vcard author">
+                By                         <a class="url fn" href="../author/viraptor.html">viraptor</a>
+        </address>
+<p>In <a href="../category/misc.html">misc</a>. </p>
+<p>tags: <a href="../tag/fuzzing.html">fuzzing</a> <a href="../tag/programming.html">programming</a> <a href="../tag/linux.html">linux</a> <a href="../tag/systemd.html">systemd</a> <a href="../tag/afl.html">afl</a> </p>
+</footer><!-- /.post-info --><p>There&#8217;s been a number of issues lately found by fuzzing input files
+(<em>strings</em>, <em>lesspipe</em>, various image issues, etc.), but these are all
+stateless apps / libraries. It&#8217;s much easier to fuzz input for <em>strings</em>
+for example, than client input to <em>mysql</em> server. The
+<a href="https://fuzzing-project.org/">fuzzing project</a> is actually concentrating on
+local input only for now and keeps protocols (network and devices) out
+of scope. But provided we can agree to some compromises, it&#8217;s possible
+to reduce many of those network communications to stateless file
+processing&nbsp;problems.</p>
+<p>Some kind of network fuzzing exercises will be easier than others. For
+example anything that uses stateless protocol by design will be easier
+than something that requires a lot of state, authentication, potential
+cache warmup, etc. Most <span class="caps">UDP</span> applications for example should be easier to
+fuzz than <span class="caps">TCP</span> ones, because they need to act on separate messages and
+preserve any state explicitly by design. It also matters a lot how well
+the application is designed. If it keeps a lot of magic global state
+around and you can&#8217;t extract parts of functionality simply, then it&#8217;s
+going to bring some&nbsp;problems.</p>
+<p>Let&#8217;s look at one such candidate: <span class="caps">UDP</span> messages, no auth, functions with
+no state - <strong>systemd-resolve</strong>, the dns resolver for systemd. While
+normally it initiates the queries, any host can send back a response
+that needs to be processed safely. In this case, let&#8217;s try to fuzz only
+one very specific part of the code: message&nbsp;parsing.</p>
+<p>Instead of starting the actual daemon though and trying to send it
+messages, we can use the required parts and construct a new program that
+will be a self-contained stateless file processor. First, we can treat
+the whole systemd as a big library and provide our own <em>main()</em> for it.
+This is actually what a lot of the <em>test-*</em> applications in systemd
+already do. Here&#8217;s a tiny file&nbsp;parser:</p>
+<div class="highlight"><pre><span class="cp">#include &quot;resolved-dns-packet.h&quot;</span>
+<span class="cp">#include &lt;stdio.h&gt;</span>
+<span class="cp">#define BUFSIZE (DNS_PACKET_SIZE_MAX-100)</span>
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">(</span><span class="kt">int</span> <span class="n">argc</span><span class="p">,</span> <span class="kt">char</span> <span class="o">**</span><span class="n">argv</span><span class="p">)</span> <span class="p">{</span>
+    <span class="kt">char</span> <span class="n">buf</span><span class="p">[</span><span class="n">BUFSIZE</span><span class="p">];</span>
+    <span class="kt">FILE</span> <span class="o">*</span><span class="n">in</span><span class="p">;</span>
+    <span class="kt">int</span> <span class="n">l</span><span class="p">,</span> <span class="n">res</span><span class="p">;</span>
+    <span class="n">DnsPacket</span> <span class="o">*</span><span class="n">p</span><span class="p">;</span>
+
+    <span class="n">in</span> <span class="o">=</span> <span class="n">fopen</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="s">&quot;r&quot;</span><span class="p">);</span>
+    <span class="n">l</span> <span class="o">=</span> <span class="n">fread</span><span class="p">(</span><span class="n">buf</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="n">BUFSIZE</span><span class="p">,</span> <span class="n">in</span><span class="p">);</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">&quot;read: %i bytes</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span> <span class="n">l</span><span class="p">);</span>
+
+    <span class="n">dns_packet_new</span><span class="p">(</span><span class="o">&amp;</span><span class="n">p</span><span class="p">,</span> <span class="n">DNS_PROTOCOL_DNS</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">);</span>
+    <span class="n">p</span><span class="o">-&gt;</span><span class="n">size</span><span class="o">=</span><span class="mi">0</span><span class="p">;</span>
+    <span class="n">res</span> <span class="o">=</span> <span class="n">dns_packet_append_blob</span><span class="p">(</span><span class="n">p</span><span class="p">,</span> <span class="n">buf</span><span class="p">,</span> <span class="n">l</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">);</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">&quot;append_blob: %i</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span> <span class="n">res</span><span class="p">);</span>
+
+    <span class="n">res</span> <span class="o">=</span> <span class="n">dns_packet_extract</span><span class="p">(</span><span class="n">p</span><span class="p">);</span>
+    <span class="n">dns_packet_unref</span><span class="p">(</span><span class="n">p</span><span class="p">);</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">&quot;%i</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span> <span class="n">res</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+
+
+<p>The <em>dns_*</em> functions are provided by <em>systemd-resolve</em> and here are
+being called in a way close to what the application does in real life.
+Specifically, if this program crashes then we can be close to certain
+that the real app will also crash - and that&#8217;s what we care about&nbsp;most.</p>
+<p>Now we can just add a new entry to <em>Makefile.am</em> to actually build&nbsp;it:</p>
+<div class="highlight"><pre>tests += \
+       test-dns-parser
+test_dns_parser_SOURCES = \
+       src/resolve/resolved-dns-packet.h \
+       src/resolve/resolved-dns-packet.c \
+       src/resolve/resolved-dns-question.h \
+       src/resolve/resolved-dns-question.c \
+       src/resolve/resolved-dns-answer.h \
+       src/resolve/resolved-dns-answer.c \
+       src/resolve/resolved-dns-rr.h \
+       src/resolve/resolved-dns-rr.c \
+       src/resolve/resolved-dns-domain.h \
+       src/resolve/resolved-dns-domain.c \
+       src/resolve/test-dns-parser.c
+</pre></div>
+
+
+<p>This app can now be easily checked with most common fuzzers like <em><span class="caps">AFL</span></em>
+for example. Just <strong><span class="caps">CC</span>=&#8230;/afl-gcc ./configure &amp;&amp; make test-dns-parser</strong>
+and run the fuzzer on it. The printed out information is only for quick
+verification of later&nbsp;results.</p>
+<p>Sample input vectors can be created from wireshark network captures, or
+even just <a href="https://gist.github.com/viraptor/a476687b339c8f726533">some trivial generator</a>.</p>
+<p>What about the compromises then? The main issue is about the tested
+scope. As seen in the resolver&#8217;s example, the only tested parts are
+parsing and a bit of the memory management. That&#8217;s not a lot and it
+doesn&#8217;t involve any of the business logic dealing with caches,
+constructing responses, etc. It only checks whether a random message
+arriving at this port is going to crash the program while it&#8217;s being
+parsed into memory structures, or&nbsp;not.</p>
+<p>Is it worth it in the end? The systemd-resolve case seems to show it is.
+There was an assert abort case (<a href="http://lists.freedesktop.org/archives/systemd-devel/2014-November/025285.html">function result not set</a>),
+null pointer read (<a href="http://lists.freedesktop.org/archives/systemd-devel/2014-November/025282.html">string vectors api misuse</a>)
+and one <a href="http://lists.freedesktop.org/archives/systemd-devel/2014-November/025284.html">infinite loop</a>
+hiding in the parsing code. All fixed upstream now. Even though they
+didn&#8217;t allow arbitrary code execution, they&#8217;d be trivial to use to
+(remotely!) DoS a server by using 100% <span class="caps">CPU</span> and stopping any hostname&nbsp;resolution.</p>                </article>
+<p class="paginator">
+    Page 1 / 1
+</p>
+            </aside><!-- /#featured -->
+        <section id="extras" class="body">
+                <div class="blogroll">
+                        <h2>blogroll</h2>
+                        <ul>
+                            <li><a href="http://getpelican.com/">Pelican</a></li>
+                            <li><a href="https://news.ycombinator.com/">Hacker News</a></li>
+                        </ul>
+                </div><!-- /.blogroll -->
+                <div class="social">
+                        <h2>social</h2>
+                        <ul>
+                            <li><a href="http://blog.viraptor.info/feeds/all.rss.xml" type="application/rss+xml" rel="alternate">rss feed</a></li>
+
+                            <li><a href="http://twitter.com/viraptor">Twitter</a></li>
+                            <li><a href="http://github.com/viraptor">Github</a></li>
+                        </ul>
+                </div><!-- /.social -->
+        </section><!-- /#extras -->
+
+        <footer id="contentinfo" class="body">
+                <address id="about" class="vcard body">
+                Proudly powered by <a href="http://getpelican.com/">Pelican</a>, which takes great advantage of <a href="http://python.org">Python</a>.
+                </address><!-- /#about -->
+
+                <p>The theme is by <a href="http://coding.smashingmagazine.com/2009/08/04/designing-a-html-5-layout-from-scratch/">Smashing Magazine</a>, thanks!</p>
+        </footer><!-- /#contentinfo -->
+
+    <script type="text/javascript">
+    var _gaq = _gaq || [];
+    _gaq.push(['_setAccount', 'UA-260586-9']);
+    _gaq.push(['_trackPageview']);
+    (function() {
+        var ga = document.createElement('script'); ga.type = 'text/javascript'; ga.async = true;
+        ga.src = ('https:' == document.location.protocol ? 'https://ssl' : 'http://www') + '.google-analytics.com/ga.js';
+        var s = document.getElementsByTagName('script')[0]; s.parentNode.insertBefore(ga, s);
+    })();
+    </script>
+</body>
+</html>

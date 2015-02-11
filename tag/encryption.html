@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+        <meta charset="utf-8" />
+        <title>Wild code - encryption</title>
+        <link rel="stylesheet" href="../theme/css/main.css" />
+        <link href="http://blog.viraptor.info/feeds/all.rss.xml" type="application/rss+xml" rel="alternate" title="Wild code RSS Feed" />
+
+        <!--[if IE]>
+            <script src="http://html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+        <![endif]-->
+</head>
+
+<body id="index" class="home">
+        <header id="banner" class="body">
+                <h1><a href="../">Wild code </a></h1>
+                <nav><ul>
+                    <li><a href="../category/misc.html">misc</a></li>
+                </ul></nav>
+        </header><!-- /#banner -->
+
+            <aside id="featured" class="body">
+                <article>
+                    <h1 class="entry-title"><a href="../post/43051577987/abc-of-cracking-abc-and-unknown-protocols"><span class="caps">ABC</span> of cracking <span class="caps">ABC</span> and unknown&nbsp;protocols</a></h1>
+<footer class="post-info">
+        <abbr class="published" title="2013-02-14T14:20:20+00:00">
+                Published: Thu 14 February 2013
+        </abbr>
+
+        <address class="vcard author">
+                By                         <a class="url fn" href="../author/viraptor.html">viraptor</a>
+        </address>
+<p>In <a href="../category/misc.html">misc</a>. </p>
+<p>tags: <a href="../tag/abc.html">abc</a> <a href="../tag/actionscript.html">actionscript</a> <a href="../tag/flash.html">flash</a> <a href="../tag/encryption.html">encryption</a> <a href="../tag/coding.html">coding</a> </p>
+</footer><!-- /.post-info --><p>I started playing some flash-based <span class="caps">MMORPG</span> for fun lately. The limited
+options available to the characters in RPGs are not as entertaining as
+programming, so this didn&#8217;t last long; but it definitely gave me an
+idea&#8230; Can I get the event stream and decode it without knowing
+anything about the game&#8217;s design and of course without any source
+available? Now that&#8217;s an interesting&nbsp;quest!</p>
+<p>Warning: if you see anything silly about <span class="caps">ABC</span> or Flash, that might be
+because I learned everything I know about it during this project. Any
+corrections&nbsp;welcome.</p>
+<p><strong>Overview of&nbsp;communication</strong></p>
+<p>Before going into the details of communication I had to figure out
+what&#8217;s happening in general - what connections are started, how much
+data is sent, what does the encapsulation look like, etc. That task is
+pretty trivial with help of Wireshark. I set it to capture everything,
+connected, entered the game for a moment and left. So what could I learn
+from this short&nbsp;record?</p>
+<p>There were three communication&nbsp;channels:</p>
+<ul>
+<li>An unencrypted <span class="caps">HTTP</span> <span class="caps">GET</span> request which returned one word (number) -
+    probably something related to a version check or cache&nbsp;invalidation</li>
+<li>An encrypted <span class="caps">HTTP</span> request which contained (thanks to <span class="caps">SSL</span> <span class="caps">MITM</span> and
+    own <span class="caps">CA</span> injection) the first login and some details about the
+    available game&nbsp;characters</li>
+<li>Then some time later, a single <span class="caps">TCP</span> connection constantly streaming
+    loads of small portions of&nbsp;data</li>
+</ul>
+<p>Everything looks pretty obvious, but&#8230; the long <span class="caps">TCP</span> connection seems to
+contain just garbage. That usually means that the data is either
+compressed or encrypted. The second one being more likely since that
+game would aim for minimum delays and small update packets. After
+checking the usual options - can &#8216;file&#8217; identify the stream, does it
+start with any standard header, can standard tools unpack it, does it
+contain any readable strings - I found that the only answer was &#8220;no&#8221;.
+Encryption it is&nbsp;then&#8230;</p>
+<p><strong>Going&nbsp;deeper</strong></p>
+<p>Finding out more details about encryption was pretty easy. I
+disassembled the code in .swf and noticed that even though the main code
+was obfuscated, the libraries weren&#8217;t. This only required a quick grep
+for &#8220;cipher&#8221; and I knew the library was from crypto.hurlant.com. After a
+moment it was obvious which function to look for (Crypto.getCipher).
+This was very useful, because at that point I knew both what functions
+were used and what arguments they take. Calls to that function were
+present in a couple of places as expected and what was left was to
+figure out where does the key come from. That part was a bit&nbsp;harder.</p>
+<p><strong>Flash decompilers are very poor&nbsp;quality</strong></p>
+<p>I tried to find some decompiler for Flash to find the source of the key
+generation. Browsing through the <span class="caps">ABC</span> was a bit too hard (even though
+<a href="http://www.adobe.com/content/dam/Adobe/en/devnet/actionscript/articles/avm2overview.pdf" title="AVM 2 Overview">the code</a>
+itself is quite simple) and I could not know how far the answer was.
+Maybe the key was generated in a trivial function, maybe it was split
+over many&nbsp;stages&#8230;</p>
+<p>I thought: why not decompile everything to <span class="caps">AS</span> source code, surely it
+can&#8217;t be that tricky. Unfortunately it was - I got 3 different results
+from the software I could get my hands on: Complete crash, crash only on
+some modules, refusing to decompile. To be honest, I did not expect
+<a href="http://www.hex-rays.com/" title="Hex Rays homepage">hexrays</a> quality but
+something that does the minimum would be great. The partial results I
+got were completely silly and quite surprising. It seems that the easily
+available flash decompilers don&#8217;t even try to recreate what the code
+does - they just switch instructions into <span class="caps">AS</span> statements. If your <span class="caps">ABC</span>
+says &#8220;inclocal_i &#8230;; declocal_i &#8230;&#8221; that&#8217;s exactly what you&#8217;ll see
+done on a temporary variable&#8230; which turns out to be unused&nbsp;afterwards.</p>
+<p>At this point I&#8217;ve done what any other insane person would do - started
+writing own decompiler. It&#8217;s not that hard really. Actually you can grab
+the last compiler you wrote (everyone wrote one, right?), and reuse
+large parts of it. Operations gets split into blocks linked to other
+blocks, you name every stack position and local variable with unique
+name, convert the code into <span class="caps">SSA</span> form, remove dead blocks, do peep-hole
+optimisations to strip silly obfuscation code, detect which loops can be
+converted into while-s/for-s and spit out the code&#8230; At stage 3 or 4, I
+noticed that the whole idea is silly and although the project was
+working nicely (probably at this point gave better results than some
+commercial solutions I tried before, even if not all opcodes were
+implemented) this is just wasting time. I had one simple task and this
+tool would take too long to complete even if it was limited to just <span class="caps">ABC</span>
+cleanup and propagating argument names into&nbsp;variables.</p>
+<p><strong>A better&nbsp;way</strong></p>
+<p>Since I didn&#8217;t really care about where the password comes from, but only
+what it is, I decided to do something else&#8230; print out the key itself.
+Apparently there&#8217;s this thing called flash debug player and you can use
+it to see the output of all &#8220;trace(&#8230;)&#8221; calls with it - awesome! Ah&#8230;
+and you need a 32b windows system for it, otherwise it&#8217;s not going to
+work - that was a bit painful, but virtualbox solved this problem quite&nbsp;well.</p>
+<p>What I needed to do was to inject a bit of custom own code into the
+existing .swf, run it under the debug version of flash and collect the
+result. Injecting the code seems pretty hard if you want to do it
+yourself. There are loads of projects which will disassemble the .swf
+file, but almost none which can reassemble it again. Fortunately
+<a href="http://code.google.com/p/apparat/" title="Apparat project homepage">Apparat</a>
+does this in a quite simple way - by providing an <span class="caps">API</span> written in Scala.
+It provides a complete, magical framework for modifying the code and the
+only thing you need to provide is a filter to choose where the
+modification should be applied and a new template to expand in that&nbsp;place.</p>
+<p>Locating the needed part was pretty easy. It looked something like&nbsp;this:</p>
+<div class="highlight"><pre>getlocal 1
+getlocal 2
+getlocal 3
+call_property getCipher, 3
+</pre></div>
+
+
+<p>This means just &#8220;load 3 local variables on the stack and call
+getCipher&#8221;. Of course the parameters were known from the library&nbsp;source:</p>
+<div class="highlight"><pre>getCipher(name:String, key:ByteArray, pad:IPad=null):ICipher
+</pre></div>
+
+
+<p>I was interested in the key and the cipher. The pad was not needed after
+all - because the cipher turned out to be &#8220;rc4&#8221;. The way it works
+(simplified) is similar to a combination of a known seed (the key), a
+pseudo-random number generator and the plaintext xor&#8217;ed with the <span class="caps">PRNG</span>&#8217;s
+output. Very simple design and there are lots of libraries available to
+verify the&nbsp;result.</p>
+<p>Because only two arguments were interesting, it meant inserting the call
+to &#8220;trace&#8221; somewhere before the call to the library can give me the
+needed data. The only thing to remember is that the stack needs to be
+returned to exactly the same state as before, otherwise the rest of the
+code would fail. None of the local variables can be overwritten either.
+This is a work for a spy: get the key, convert to string, print out, put
+everything back in its place. Here&#8217;s the full filter for Apparat,
+printing out the second&nbsp;parameter:</p>
+<div class="highlight"><pre><span class="k">private</span> <span class="nf">lazy</span> <span class="nx">val</span> <span class="n">traceCipherCall</span><span class="o"> =</span> <span class="p">{</span>
+  <span class="p">(</span><span class="nx">GetLocal</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span> <span class="err">~</span> <span class="nx">GetLocal</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span> <span class="err">~</span> <span class="nx">GetLocal</span><span class="p">(</span><span class="mi">3</span><span class="p">)</span> <span class="err">~</span> <span class="nx">BytecodeChains.partial</span> <span class="p">{</span>
+    <span class="k">case</span> <span class="nx">originalCall</span> <span class="p">@</span> <span class="nx">CallProperty</span><span class="p">(</span><span class="nx">name</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span> <span class="k">if</span> <span class="nx">name</span> <span class="o">==</span> <span class="n">getCipherQName</span><span class="o"> =&gt;</span> <span class="nx">originalCall</span>
+  <span class="p">})</span> <span class="p">^^</span> <span class="p">{</span>
+    <span class="k">case</span> <span class="p">(</span><span class="nx">GetLocal</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span> <span class="err">~</span> <span class="nx">GetLocal</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span> <span class="err">~</span> <span class="nx">GetLocal</span><span class="p">(</span><span class="mi">3</span><span class="p">)</span> <span class="err">~</span> <span class="nx">x</span><span class="p">)</span> <span class="o">=&gt;</span> <span class="kt">List</span><span class="err">[</span><span class="nx">AbstractOp</span><span class="cp">]</span><span class="x">(</span>
+<span class="x">      FindPropStrict(traceQName),</span>
+<span class="x">      GetLocal(2),</span>
+<span class="x">      ConvertString(),</span>
+<span class="x">      CallPropVoid(traceQName, 1),</span>
+<span class="x">      GetLocal(1),</span>
+<span class="x">      GetLocal(2),</span>
+<span class="x">      GetLocal(3),</span>
+<span class="x">      x)</span>
+<span class="x">    case _ =&gt; error(&quot;internal fail&quot;)</span>
+<span class="x">  }</span>
+<span class="x">}</span>
+</pre></div>
+
+
+<p>This is fairly simple - match 3 getlocal-s followed by a call to
+&#8220;getCipher&#8221;. This sequence is pretty specific, so it matched only in 2
+places - exactly where it was needed. Now I needed to get the output.
+One installation of windows + debug flash + tons of crap later, I
+discovered that&#8230; the application detects whether it&#8217;s running in a
+debugging environment and changes its configuration to use the test
+server&nbsp;instead.</p>
+<p><strong>Removing debugger&nbsp;detection</strong></p>
+<p>Two google searches later I found that the most likely way of debugger
+detection is checking the &#8220;isDebugger&#8221; variable. Unfortunately the check
+wasn&#8217;t done in a simple if/else way. The code pushed the &#8220;isDebugger&#8221;
+string to some other function which then saved the results of the number
+of checks. I really didn&#8217;t want to get into the details of how that
+happens. The easiest alternative was to use some other flag which was
+guaranteed to be false. Luckily, &#8220;avHardwareDisable&#8221; turned out to be a
+good candidate. The modification was quickly applied&#8230; and the app went
+into testing mode again. Something else was missing - the most trivial
+fix was not&nbsp;enough.</p>
+<p>The second simplest thing to try was to look for the string describing
+the testing server and browse the code around it for some condition
+checking. And it was there! Some function was doing what looked like a
+dns lookup (still not sure if that was the case) and comparing the
+result to a known value - apparently running in a debugger influenced
+the result somehow. Since adding the &#8220;testing&#8221; string depended on the
+result of this function, it was a good enough candidate for patching.
+Fortunately the following&nbsp;sequence:</p>
+<div class="highlight"><pre>  convert_string
+  equals
+  getlocal_2
+  if_true &quot;L2&quot;
+  not
+&quot;L2:&quot;
+  return_value
+</pre></div>
+
+
+<p>is not that popular. What happens here is: two strings get compared
+first, then the result gets flipped if local_2 is not set, then the
+result is returned. It&#8217;s basically returning the result of string
+comparison xor local_2 - probably it went through bytecode obfuscation.
+The good way to hardcode the result without messing up the stack was
+changing the beginning&nbsp;to:</p>
+<div class="highlight"><pre>poppush_false
+push_true
+</pre></div>
+
+
+<p>And&#8230; success! On the next try the application connected to a
+production server and printed out the key it used. Not only that, but
+the key was successfully used later on to read and write any of the
+events sent between the client and the server. But that&#8217;s a topic for
+another post in the&nbsp;future.</p>
+<p>Lessons if you want to protect your&nbsp;communication:</p>
+<ul>
+<li>obfuscate the object files after including the libraries, not
+    before - especially if the libraries are&nbsp;open-source</li>
+<li>do a random key exchange instead of hardcoding your&nbsp;passphrase</li>
+<li>add <span class="caps">CA</span> verification (is it possible in flash? not&nbsp;sure)</li>
+<li>disassemble your own binaries to find&nbsp;issues</li>
+<li>&#8230; all of the above will be worked around and your app will be
+    hacked anyway, get used to the idea&nbsp;:)</li>
+</ul>                </article>
+<p class="paginator">
+    Page 1 / 1
+</p>
+            </aside><!-- /#featured -->
+        <section id="extras" class="body">
+                <div class="blogroll">
+                        <h2>blogroll</h2>
+                        <ul>
+                            <li><a href="http://getpelican.com/">Pelican</a></li>
+                            <li><a href="https://news.ycombinator.com/">Hacker News</a></li>
+                        </ul>
+                </div><!-- /.blogroll -->
+                <div class="social">
+                        <h2>social</h2>
+                        <ul>
+                            <li><a href="http://blog.viraptor.info/feeds/all.rss.xml" type="application/rss+xml" rel="alternate">rss feed</a></li>
+
+                            <li><a href="http://twitter.com/viraptor">Twitter</a></li>
+                            <li><a href="http://github.com/viraptor">Github</a></li>
+                        </ul>
+                </div><!-- /.social -->
+        </section><!-- /#extras -->
+
+        <footer id="contentinfo" class="body">
+                <address id="about" class="vcard body">
+                Proudly powered by <a href="http://getpelican.com/">Pelican</a>, which takes great advantage of <a href="http://python.org">Python</a>.
+                </address><!-- /#about -->
+
+                <p>The theme is by <a href="http://coding.smashingmagazine.com/2009/08/04/designing-a-html-5-layout-from-scratch/">Smashing Magazine</a>, thanks!</p>
+        </footer><!-- /#contentinfo -->
+
+    <script type="text/javascript">
+    var _gaq = _gaq || [];
+    _gaq.push(['_setAccount', 'UA-260586-9']);
+    _gaq.push(['_trackPageview']);
+    (function() {
+        var ga = document.createElement('script'); ga.type = 'text/javascript'; ga.async = true;
+        ga.src = ('https:' == document.location.protocol ? 'https://ssl' : 'http://www') + '.google-analytics.com/ga.js';
+        var s = document.getElementsByTagName('script')[0]; s.parentNode.insertBefore(ga, s);
+    })();
+    </script>
+</body>
+</html>

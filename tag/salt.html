@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+        <meta charset="utf-8" />
+        <title>Wild code - salt</title>
+        <link rel="stylesheet" href="../theme/css/main.css" />
+        <link href="http://blog.viraptor.info/feeds/all.rss.xml" type="application/rss+xml" rel="alternate" title="Wild code RSS Feed" />
+
+        <!--[if IE]>
+            <script src="http://html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+        <![endif]-->
+</head>
+
+<body id="index" class="home">
+        <header id="banner" class="body">
+                <h1><a href="../">Wild code </a></h1>
+                <nav><ul>
+                    <li><a href="../category/misc.html">misc</a></li>
+                </ul></nav>
+        </header><!-- /#banner -->
+
+            <aside id="featured" class="body">
+                <article>
+                    <h1 class="entry-title"><a href="../post/75262988169/ubuntu-unattended-upgrades-the-salt-way">Ubuntu unattended upgrades the salt&nbsp;way</a></h1>
+<footer class="post-info">
+        <abbr class="published" title="2014-02-02T03:25:00+00:00">
+                Published: Sun 02 February 2014
+        </abbr>
+
+        <address class="vcard author">
+                By                         <a class="url fn" href="../author/viraptor.html">viraptor</a>
+        </address>
+<p>In <a href="../category/misc.html">misc</a>. </p>
+<p>tags: <a href="../tag/salt.html">salt</a> <a href="../tag/ubuntu.html">ubuntu</a> <a href="../tag/unattended-upgrade.html">unattended upgrade</a> </p>
+</footer><!-- /.post-info --><p>There are many ways to turn on the unattended upgrades in Ubuntu.
+Creating files in /etc/apt/apt.conf.d, reconfiguring the package by
+hand, reinstalling after debconf,&nbsp;etc.</p>
+<p>Here&#8217;s a simple way to do it with salt without breaking the Ubuntu /
+debconf&nbsp;integration:</p>
+<div class="highlight"><pre>unattended-upgrades:
+  debconf.set:
+    - data:
+        &#39;unattended-upgrades/enable_auto_updates&#39;:
+          type: boolean
+          value: &quot;true&quot;
+
+  cmd.wait:
+    - name: &quot;dpkg-reconfigure unattended-upgrades&quot;
+    - watch:
+      - debconf: unattended-upgrades
+    - env:
+        DEBIAN_FRONTEND: noninteractive
+        DEBCONF_NONINTERACTIVE_SEEN: &quot;true&quot;
+</pre></div>                </article>
+            </aside><!-- /#featured -->
+                <section id="content" class="body">
+                    <h1>Other articles</h1>
+                    <hr />
+                    <ol id="posts-list" class="hfeed">
+
+            <li><article class="hentry">
+                <header>
+                    <h1><a href="../post/60000186508/issues-with-preseeding-dbconfig" rel="bookmark"
+                           title="Permalink to Issues with preseeding dbconfig">Issues with preseeding&nbsp;dbconfig</a></h1>
+                </header>
+
+                <div class="entry-content">
+<footer class="post-info">
+        <abbr class="published" title="2013-09-02T05:31:37+00:00">
+                Published: Mon 02 September 2013
+        </abbr>
+
+        <address class="vcard author">
+                By                         <a class="url fn" href="../author/viraptor.html">viraptor</a>
+        </address>
+<p>In <a href="../category/misc.html">misc</a>. </p>
+<p>tags: <a href="../tag/preseed.html">preseed</a> <a href="../tag/ubuntu.html">ubuntu</a> <a href="../tag/salt.html">salt</a> <a href="../tag/automation.html">automation</a> </p>
+</footer><!-- /.post-info -->                <p>There&#8217;s an interesting side effect to way Debian-like systems handle the
+database configuration for various packages. Instead of each package
+setting the connection parameters on their own, they reuse the
+abstraction provided by package &#8216;dbconfig-common&#8217;. This is all fine in
+theory, but unfortunately dbconfig doesn&#8217;t seem to behave ...</p>
+                <a class="readmore" href="../post/60000186508/issues-with-preseeding-dbconfig">read more</a>
+                </div><!-- /.entry-content -->
+            </article></li>
+                </ol><!-- /#posts-list -->
+<p class="paginator">
+    Page 1 / 1
+</p>
+                </section><!-- /#content -->
+        <section id="extras" class="body">
+                <div class="blogroll">
+                        <h2>blogroll</h2>
+                        <ul>
+                            <li><a href="http://getpelican.com/">Pelican</a></li>
+                            <li><a href="https://news.ycombinator.com/">Hacker News</a></li>
+                        </ul>
+                </div><!-- /.blogroll -->
+                <div class="social">
+                        <h2>social</h2>
+                        <ul>
+                            <li><a href="http://blog.viraptor.info/feeds/all.rss.xml" type="application/rss+xml" rel="alternate">rss feed</a></li>
+
+                            <li><a href="http://twitter.com/viraptor">Twitter</a></li>
+                            <li><a href="http://github.com/viraptor">Github</a></li>
+                        </ul>
+                </div><!-- /.social -->
+        </section><!-- /#extras -->
+
+        <footer id="contentinfo" class="body">
+                <address id="about" class="vcard body">
+                Proudly powered by <a href="http://getpelican.com/">Pelican</a>, which takes great advantage of <a href="http://python.org">Python</a>.
+                </address><!-- /#about -->
+
+                <p>The theme is by <a href="http://coding.smashingmagazine.com/2009/08/04/designing-a-html-5-layout-from-scratch/">Smashing Magazine</a>, thanks!</p>
+        </footer><!-- /#contentinfo -->
+
+    <script type="text/javascript">
+    var _gaq = _gaq || [];
+    _gaq.push(['_setAccount', 'UA-260586-9']);
+    _gaq.push(['_trackPageview']);
+    (function() {
+        var ga = document.createElement('script'); ga.type = 'text/javascript'; ga.async = true;
+        ga.src = ('https:' == document.location.protocol ? 'https://ssl' : 'http://www') + '.google-analytics.com/ga.js';
+        var s = document.getElementsByTagName('script')[0]; s.parentNode.insertBefore(ga, s);
+    })();
+    </script>
+</body>
+</html>
